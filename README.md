@@ -1,14 +1,12 @@
-# Ritmo
+# Nastro
 
-Aggiungi la tua musica a un video, direttamente nel browser.
+Comprimi video mantenendo una buona qualità e aggiungi la tua musica — tutto nel browser.
 
-## Funzionalità
+## Funzioni
 
-- Carica un video e una traccia audio
-- Sostituisci l’audio oppure mixalo con l’originale
-- Regola i volumi
-- Scarica il risultato in MP4
-- Tutto resta sul tuo dispositivo (FFmpeg.wasm)
+- **Comprimi**: qualità, FPS, risoluzione
+- **Musica**: sostituisci o mixa l’audio del video
+- Elaborazione locale con FFmpeg.wasm (nessun upload su server)
 
 ## Sviluppo
 

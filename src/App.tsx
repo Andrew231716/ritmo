@@ -3,7 +3,26 @@ import { fetchFile, toBlobURL } from '@ffmpeg/util'
 import { useEffect, useRef, useState, type DragEvent } from 'react'
 import './App.css'
 
+type AppTab = 'compress' | 'music'
 type MixMode = 'replace' | 'mix'
+type QualityPreset = 'high' | 'balanced' | 'small'
+
+type FpsOption = 'original' | '60' | '30' | '24' | '15'
+type ResOption = 'original' | '1080' | '720' | '480'
+
+const PRESETS: Record<
+  QualityPreset,
+  { label: string; hint: string; crf: number; preset: string }
+> = {
+  high: { label: 'Alta', hint: 'Ottima qualità, file più grande', crf: 18, preset: 'slow' },
+  balanced: {
+    label: 'Bilanciata',
+    hint: 'Buona qualità, peso ragionevole',
+    crf: 23,
+    preset: 'medium',
+  },
+  small: { label: 'Compatta', hint: 'File più leggero, qualità ok', crf: 28, preset: 'veryfast' },
+}
 
 function formatBytes(bytes: number) {
   if (bytes < 1024) return `${bytes} B`
@@ -38,20 +57,20 @@ function BrandMark() {
   return (
     <div className="brand-mark" aria-hidden>
       <svg viewBox="0 0 24 24" fill="none">
-        <circle cx="8" cy="16" r="3.2" fill="#F0B429" />
-        <circle cx="16.5" cy="13.5" r="2.6" fill="#F0B429" opacity="0.85" />
-        <path
-          d="M11 4v12M16.5 5.5v8"
+        <rect
+          x="3"
+          y="5"
+          width="18"
+          height="14"
+          rx="2.5"
           stroke="#E8F2EF"
-          strokeWidth="2.2"
-          strokeLinecap="round"
+          strokeWidth="1.8"
         />
-        <path
-          d="M11 4c3.2 1.2 5.5 2.2 5.5 1.2"
-          stroke="#E8F2EF"
-          strokeWidth="2.2"
-          strokeLinecap="round"
-        />
+        <path d="M3 8.5h18M3 15.5h18" stroke="#E8F2EF" strokeWidth="1.4" opacity="0.35" />
+        <rect x="5.5" y="10" width="2.4" height="4" rx="0.5" fill="#F0B429" />
+        <rect x="9.2" y="10" width="2.4" height="4" rx="0.5" fill="#F0B429" opacity="0.75" />
+        <rect x="12.9" y="10" width="2.4" height="4" rx="0.5" fill="#F0B429" opacity="0.5" />
+        <rect x="16.6" y="10" width="2.4" height="4" rx="0.5" fill="#F0B429" opacity="0.3" />
       </svg>
     </div>
   )
@@ -62,18 +81,30 @@ export default function App() {
   const logsRef = useRef<string[]>([])
   const [ready, setReady] = useState(false)
   const [loadingEngine, setLoadingEngine] = useState(true)
+  const [tab, setTab] = useState<AppTab>('compress')
+
   const [video, setVideo] = useState<File | null>(null)
   const [audio, setAudio] = useState<File | null>(null)
   const [videoUrl, setVideoUrl] = useState<string | null>(null)
   const [resultUrl, setResultUrl] = useState<string | null>(null)
+  const [resultSize, setResultSize] = useState<number | null>(null)
+
   const [musicVolume, setMusicVolume] = useState(80)
   const [originalVolume, setOriginalVolume] = useState(30)
-  const [mode, setMode] = useState<MixMode>('replace')
+  const [mixMode, setMixMode] = useState<MixMode>('replace')
+
+  const [quality, setQuality] = useState<QualityPreset>('balanced')
+  const [fps, setFps] = useState<FpsOption>('original')
+  const [resolution, setResolution] = useState<ResOption>('original')
+  const [crfOverride, setCrfOverride] = useState<number | null>(null)
+
   const [busy, setBusy] = useState(false)
   const [progress, setProgress] = useState(0)
   const [status, setStatus] = useState('Caricamento motore video…')
   const [error, setError] = useState<string | null>(null)
   const [dragOver, setDragOver] = useState<'video' | 'audio' | null>(null)
+
+  const effectiveCrf = crfOverride ?? PRESETS[quality].crf
 
   useEffect(() => {
     let cancelled = false
@@ -103,7 +134,7 @@ export default function App() {
         if (!cancelled) {
           setReady(true)
           setLoadingEngine(false)
-          setStatus('Pronto. Carica un video e una traccia audio.')
+          setStatus('Pronto. Scegli cosa fare e carica un video.')
         }
       } catch (err) {
         console.error(err)
@@ -140,14 +171,19 @@ export default function App() {
     }
   }, [resultUrl])
 
-  function pickFile(kind: 'video' | 'audio', file: File | undefined | null) {
-    if (!file) return
-    setError(null)
+  function clearResult() {
     setResultUrl((prev) => {
       if (prev) URL.revokeObjectURL(prev)
       return null
     })
+    setResultSize(null)
     setProgress(0)
+  }
+
+  function pickFile(kind: 'video' | 'audio', file: File | undefined | null) {
+    if (!file) return
+    setError(null)
+    clearResult()
 
     if (kind === 'video') {
       if (!isVideoFile(file)) {
@@ -157,7 +193,7 @@ export default function App() {
       setVideo(file)
       if (file.size > 80 * 1024 * 1024) {
         setStatus(
-          `Video da ${formatBytes(file.size)}: l’elaborazione può richiedere diversi minuti e più memoria.`,
+          `Video da ${formatBytes(file.size)}: l’elaborazione può richiedere diversi minuti.`,
         )
       }
       return
@@ -187,7 +223,106 @@ export default function App() {
     }
   }
 
-  async function mix() {
+  async function finishOutput(outName: string, downloadName: string) {
+    const ffmpeg = ffmpegRef.current!
+    const data = await ffmpeg.readFile(outName)
+    const bytes = toU8(data)
+    const copy = new Uint8Array(bytes.byteLength)
+    copy.set(bytes)
+    const blob = new Blob([copy], { type: 'video/mp4' })
+    if (blob.size < 1000) throw new Error('Output vuoto o troppo piccolo')
+
+    const url = URL.createObjectURL(blob)
+    setResultUrl((prev) => {
+      if (prev) URL.revokeObjectURL(prev)
+      return url
+    })
+    setResultSize(blob.size)
+    setProgress(100)
+    setStatus(`Fatto! Scarica «${downloadName}».`)
+    return blob
+  }
+
+  async function compress() {
+    if (!video || !ffmpegRef.current || !ready || busy) return
+
+    setBusy(true)
+    setError(null)
+    setProgress(1)
+    setStatus('Preparazione compressione…')
+
+    const ffmpeg = ffmpegRef.current
+    const videoName = 'input_video' + extOf(video.name, '.mp4')
+    const outName = 'compressed.mp4'
+    const { preset } = PRESETS[quality]
+    const crf = effectiveCrf
+
+    try {
+      for (const name of [videoName, outName]) {
+        try {
+          await ffmpeg.deleteFile(name)
+        } catch {
+          /* ok */
+        }
+      }
+
+      setStatus('Caricamento video…')
+      await ffmpeg.writeFile(videoName, await fetchFile(video))
+      setStatus('Compressione in corso… non chiudere la pagina')
+
+      const filters: string[] = []
+      if (resolution !== 'original') {
+        filters.push(`scale=-2:${resolution}`)
+      }
+      if (fps !== 'original') {
+        filters.push(`fps=${fps}`)
+      }
+
+      const args = ['-i', videoName]
+      if (filters.length) {
+        args.push('-vf', filters.join(','))
+      }
+      args.push(
+        '-c:v',
+        'libx264',
+        '-preset',
+        preset,
+        '-crf',
+        String(crf),
+        '-pix_fmt',
+        'yuv420p',
+        '-c:a',
+        'aac',
+        '-b:a',
+        quality === 'high' ? '192k' : quality === 'balanced' ? '128k' : '96k',
+        '-movflags',
+        '+faststart',
+        outName,
+      )
+
+      await runFfmpeg(args)
+      const blob = await finishOutput(outName, 'nastro-compresso.mp4')
+      if (video.size > 0 && blob.size < video.size) {
+        const saved = Math.round((1 - blob.size / video.size) * 100)
+        setStatus(`Fatto! Circa ${saved}% più leggero. Scarica l’MP4.`)
+      }
+    } catch (err) {
+      console.error(err)
+      setError('Compressione fallita. Prova un preset più leggero o Chrome/Edge.')
+      setStatus('')
+    } finally {
+      for (const name of [videoName, outName]) {
+        try {
+          await ffmpeg.deleteFile(name)
+        } catch {
+          /* ignore */
+        }
+      }
+      setBusy(false)
+    }
+  }
+
+  async function mixMusic() {
     if (!video || !audio || !ffmpegRef.current || !ready || busy) return
 
     setBusy(true)
@@ -201,11 +336,9 @@ export default function App() {
     const outName = 'output.mp4'
     const musicVol = Math.max(0.05, musicVolume / 100)
     const origVol = Math.max(0, originalVolume / 100)
-
     const cleanupNames = [videoName, audioName, outName]
 
     try {
-      // Clear previous virtual FS leftovers
       for (const name of cleanupNames) {
         try {
           await ffmpeg.deleteFile(name)
@@ -219,7 +352,7 @@ export default function App() {
       await ffmpeg.writeFile(audioName, await fetchFile(audio))
       setStatus(
         video.size > 80 * 1024 * 1024
-          ? 'Unione in corso su video grande… attendi senza chiudere la pagina'
+          ? 'Unione in corso su video grande… attendi'
           : 'Unione in corso… può richiedere un minuto',
       )
 
@@ -286,10 +419,8 @@ export default function App() {
       ]
 
       async function tryMix(base: readonly string[]) {
-        // Fast path: keep original video stream (better for large phone videos)
         try {
           await runFfmpeg([...base, ...copyTail])
-          return
         } catch {
           try {
             await ffmpeg.deleteFile(outName)
@@ -301,7 +432,7 @@ export default function App() {
         }
       }
 
-      if (mode === 'replace') {
+      if (mixMode === 'replace') {
         await tryMix(audioOnlyReplace)
       } else {
         try {
@@ -312,29 +443,11 @@ export default function App() {
         }
       }
 
-      const data = await ffmpeg.readFile(outName)
-      const bytes = toU8(data)
-      const copy = new Uint8Array(bytes.byteLength)
-      copy.set(bytes)
-      const blob = new Blob([copy], { type: 'video/mp4' })
-      if (blob.size < 1000) {
-        throw new Error('Output vuoto o troppo piccolo')
-      }
-
-      const url = URL.createObjectURL(blob)
-      setResultUrl((prev) => {
-        if (prev) URL.revokeObjectURL(prev)
-        return url
-      })
-      setProgress(100)
+      await finishOutput(outName, 'nastro-musica.mp4')
       setStatus('Fatto! Guarda l’anteprima e scarica l’MP4.')
     } catch (err) {
       console.error(err)
-      const detail = err instanceof Error ? err.message : String(err)
-      const hint = detail.includes('SharedArrayBuffer')
-        ? 'Browser non supportato.'
-        : 'Prova MP4 + MP3 più leggeri, oppure Chrome/Edge.'
-      setError(`Elaborazione fallita. ${hint}`)
+      setError('Elaborazione fallita. Prova MP4 + MP3, oppure Chrome/Edge.')
       setStatus('')
     } finally {
       for (const name of cleanupNames) {
@@ -348,14 +461,18 @@ export default function App() {
     }
   }
 
+  const canCompress = Boolean(video && ready && !busy)
   const canMix = Boolean(video && audio && ready && !busy)
 
   let help = ''
   if (!ready && loadingEngine) help = 'Attendi: sto caricando il motore video…'
   else if (!ready) help = 'Motore non pronto: ricarica o usa Chrome/Edge.'
-  else if (!video && !audio) help = 'Carica un video e un file audio (MP3/M4A), poi premi il pulsante.'
+  else if (tab === 'compress') {
+    if (!video) help = 'Carica un video, scegli qualità/FPS e premi Comprimi.'
+    else if (busy) help = 'Compressione in corso…'
+  } else if (!video && !audio) help = 'Carica video + file audio (MP3/M4A), poi premi il pulsante.'
   else if (!video) help = 'Manca il video.'
-  else if (!audio) help = 'Manca la musica (file audio sul telefono, non Spotify).'
+  else if (!audio) help = 'Manca la musica (file sul telefono, non Spotify).'
   else if (busy) help = 'Elaborazione in corso…'
 
   return (
@@ -363,16 +480,49 @@ export default function App() {
       <header>
         <div className="brand">
           <BrandMark />
-          <h1 className="brand-name">Ritmo</h1>
+          <h1 className="brand-name">Nastro</h1>
         </div>
         <p className="tagline">
-          Metti la tua musica su un video. Tutto resta sul tuo dispositivo: niente upload su
-          server.
+          Comprimi i video tenendo una bella qualità, oppure metti la tua musica. Tutto resta sul
+          tuo dispositivo.
         </p>
       </header>
 
+      <div
+        className="tabs"
+        role="tablist"
+        aria-label="Modalità"
+      >
+        <button
+          type="button"
+          role="tab"
+          className={`tab ${tab === 'compress' ? 'active' : ''}`}
+          aria-selected={tab === 'compress'}
+          onClick={() => {
+            setTab('compress')
+            setError(null)
+            clearResult()
+          }}
+        >
+          Comprimi
+        </button>
+        <button
+          type="button"
+          role="tab"
+          className={`tab ${tab === 'music' ? 'active' : ''}`}
+          aria-selected={tab === 'music'}
+          onClick={() => {
+            setTab('music')
+            setError(null)
+            clearResult()
+          }}
+        >
+          Musica
+        </button>
+      </div>
+
       <div className="workspace">
-        <div className="drop-grid">
+        <div className={`drop-grid ${tab === 'compress' ? 'single' : ''}`}>
           <label
             className={`dropzone ${video ? 'has-file' : ''} ${dragOver === 'video' ? 'active' : ''}`}
             onDragOver={(e) => {
@@ -382,7 +532,7 @@ export default function App() {
             onDragLeave={() => setDragOver(null)}
             onDrop={(e) => onDrop('video', e)}
           >
-            <p className="drop-label">1 · Video</p>
+            <p className="drop-label">Video</p>
             <p className="drop-hint">Trascina o clicca · MP4, WebM, MOV</p>
             {video && (
               <div className="file-chip">
@@ -398,30 +548,32 @@ export default function App() {
             />
           </label>
 
-          <label
-            className={`dropzone ${audio ? 'has-file' : ''} ${dragOver === 'audio' ? 'active' : ''}`}
-            onDragOver={(e) => {
-              e.preventDefault()
-              setDragOver('audio')
-            }}
-            onDragLeave={() => setDragOver(null)}
-            onDrop={(e) => onDrop('audio', e)}
-          >
-            <p className="drop-label">2 · Musica</p>
-            <p className="drop-hint">File MP3 / WAV / M4A (non da Spotify)</p>
-            {audio && (
-              <div className="file-chip">
-                <span>
-                  {audio.name} · {formatBytes(audio.size)}
-                </span>
-              </div>
-            )}
-            <input
-              type="file"
-              accept="audio/*,.mp3,.wav,.m4a,.aac,.ogg,.flac"
-              onChange={(e) => pickFile('audio', e.target.files?.[0])}
-            />
-          </label>
+          {tab === 'music' && (
+            <label
+              className={`dropzone ${audio ? 'has-file' : ''} ${dragOver === 'audio' ? 'active' : ''}`}
+              onDragOver={(e) => {
+                e.preventDefault()
+                setDragOver('audio')
+              }}
+              onDragLeave={() => setDragOver(null)}
+              onDrop={(e) => onDrop('audio', e)}
+            >
+              <p className="drop-label">Musica</p>
+              <p className="drop-hint">File MP3 / WAV / M4A (non da Spotify)</p>
+              {audio && (
+                <div className="file-chip">
+                  <span>
+                    {audio.name} · {formatBytes(audio.size)}
+                  </span>
+                </div>
+              )}
+              <input
+                type="file"
+                accept="audio/*,.mp3,.wav,.m4a,.aac,.ogg,.flac"
+                onChange={(e) => pickFile('audio', e.target.files?.[0])}
+              />
+            </label>
+          )}
         </div>
 
         {(videoUrl || resultUrl) && (
@@ -436,59 +588,144 @@ export default function App() {
         )}
 
         <section className="controls">
-          <label className="toggle">
-            <input
-              type="checkbox"
-              checked={mode === 'mix'}
-              onChange={(e) => setMode(e.target.checked ? 'mix' : 'replace')}
-            />
-            Mantieni anche l’audio originale del video (mix)
-          </label>
+          {tab === 'compress' ? (
+            <>
+              <div className="preset-row" role="group" aria-label="Preset qualità">
+                {(Object.keys(PRESETS) as QualityPreset[]).map((key) => (
+                  <button
+                    key={key}
+                    type="button"
+                    className={`preset ${quality === key ? 'active' : ''}`}
+                    onClick={() => {
+                      setQuality(key)
+                      setCrfOverride(null)
+                    }}
+                  >
+                    <strong>{PRESETS[key].label}</strong>
+                    <span>{PRESETS[key].hint}</span>
+                  </button>
+                ))}
+              </div>
 
-          <div className="control-row">
-            <label>
-              Volume musica <em>{musicVolume}%</em>
-            </label>
-            <input
-              type="range"
-              min={0}
-              max={100}
-              value={musicVolume}
-              onChange={(e) => setMusicVolume(Number(e.target.value))}
-            />
-          </div>
+              <div className="field-grid">
+                <div className="control-row">
+                  <label htmlFor="fps">FPS</label>
+                  <select
+                    id="fps"
+                    value={fps}
+                    onChange={(e) => setFps(e.target.value as FpsOption)}
+                  >
+                    <option value="original">Come l’originale</option>
+                    <option value="60">60 fps</option>
+                    <option value="30">30 fps</option>
+                    <option value="24">24 fps (cinema)</option>
+                    <option value="15">15 fps</option>
+                  </select>
+                </div>
 
-          {mode === 'mix' && (
-            <div className="control-row">
-              <label>
-                Volume audio originale <em>{originalVolume}%</em>
+                <div className="control-row">
+                  <label htmlFor="res">Risoluzione</label>
+                  <select
+                    id="res"
+                    value={resolution}
+                    onChange={(e) => setResolution(e.target.value as ResOption)}
+                  >
+                    <option value="original">Come l’originale</option>
+                    <option value="1080">1080p</option>
+                    <option value="720">720p</option>
+                    <option value="480">480p</option>
+                  </select>
+                </div>
+              </div>
+
+              <div className="control-row">
+                <label>
+                  Qualità fine (CRF) <em>{effectiveCrf}</em>
+                </label>
+                <input
+                  type="range"
+                  min={15}
+                  max={32}
+                  value={effectiveCrf}
+                  onChange={(e) => setCrfOverride(Number(e.target.value))}
+                />
+                <p className="drop-hint">Valori più bassi = qualità più alta e file più grande.</p>
+              </div>
+
+              <div className="actions">
+                <button
+                  type="button"
+                  className="btn btn-primary"
+                  disabled={!canCompress}
+                  onClick={() => void compress()}
+                >
+                  {busy && tab === 'compress' && <span className="spinner" aria-hidden />}
+                  {busy && tab === 'compress' ? 'Compressione…' : 'Comprimi video'}
+                </button>
+                {resultUrl && tab === 'compress' && (
+                  <a className="btn btn-ghost" href={resultUrl} download="nastro-compresso.mp4">
+                    Scarica MP4
+                  </a>
+                )}
+              </div>
+            </>
+          ) : (
+            <>
+              <label className="toggle">
+                <input
+                  type="checkbox"
+                  checked={mixMode === 'mix'}
+                  onChange={(e) => setMixMode(e.target.checked ? 'mix' : 'replace')}
+                />
+                Mantieni anche l’audio originale del video (mix)
               </label>
-              <input
-                type="range"
-                min={0}
-                max={100}
-                value={originalVolume}
-                onChange={(e) => setOriginalVolume(Number(e.target.value))}
-              />
-            </div>
-          )}
 
-          <div className="actions">
-            <button
-              type="button"
-              className="btn btn-primary"
-              disabled={!canMix}
-              onClick={() => void mix()}
-            >
-              {busy && <span className="spinner" aria-hidden />}
-              {busy ? 'Elaborazione…' : '3 · Metti la musica'}
-            </button>
-            {resultUrl && (
-              <a className="btn btn-ghost" href={resultUrl} download="ritmo-video.mp4">
-                Scarica MP4
-              </a>
-            )}
-          </div>
+              <div className="control-row">
+                <label>
+                  Volume musica <em>{musicVolume}%</em>
+                </label>
+                <input
+                  type="range"
+                  min={0}
+                  max={100}
+                  value={musicVolume}
+                  onChange={(e) => setMusicVolume(Number(e.target.value))}
+                />
+              </div>
+
+              {mixMode === 'mix' && (
+                <div className="control-row">
+                  <label>
+                    Volume audio originale <em>{originalVolume}%</em>
+                  </label>
+                  <input
+                    type="range"
+                    min={0}
+                    max={100}
+                    value={originalVolume}
+                    onChange={(e) => setOriginalVolume(Number(e.target.value))}
+                  />
+                </div>
+              )}
+
+              <div className="actions">
+                <button
+                  type="button"
+                  className="btn btn-primary"
+                  disabled={!canMix}
+                  onClick={() => void mixMusic()}
+                >
+                  {busy && tab === 'music' && <span className="spinner" aria-hidden />}
+                  {busy && tab === 'music' ? 'Elaborazione…' : 'Metti la musica'}
+                </button>
+                {resultUrl && tab === 'music' && (
+                  <a className="btn btn-ghost" href={resultUrl} download="nastro-musica.mp4">
+                    Scarica MP4
+                  </a>
+                )}
+              </div>
+            </>
+          )}
 
           {(busy || progress > 0) && (
             <div className="progress" aria-hidden>
@@ -496,9 +733,18 @@ export default function App() {
             </div>
           )}
 
-          <p className={`status ${error ? 'error' : ''}`}>
-            {error ?? (help || status)}
-          </p>
+          {video && resultSize != null && (
+            <div className="stats">
+              <span>
+                Originale <strong>{formatBytes(video.size)}</strong>
+              </span>
+              <span>
+                Risultato <strong>{formatBytes(resultSize)}</strong>
+              </span>
+            </div>
+          )}
+
+          <p className={`status ${error ? 'error' : ''}`}>{error ?? (help || status)}</p>
         </section>
       </div>
 
