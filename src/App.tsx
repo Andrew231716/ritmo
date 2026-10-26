@@ -1,6 +1,6 @@
 import { FFmpeg } from '@ffmpeg/ffmpeg'
 import { fetchFile, toBlobURL } from '@ffmpeg/util'
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useRef, useState, type DragEvent } from 'react'
 import './App.css'
 
 type MixMode = 'replace' | 'mix'
@@ -9,6 +9,29 @@ function formatBytes(bytes: number) {
   if (bytes < 1024) return `${bytes} B`
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
+}
+
+function isVideoFile(file: File) {
+  if (file.type.startsWith('video/')) return true
+  return /\.(mp4|webm|mov|m4v|mkv|avi|3gp)$/i.test(file.name)
+}
+
+function isAudioFile(file: File) {
+  if (file.type.startsWith('audio/')) return true
+  return /\.(mp3|wav|m4a|aac|ogg|flac|wma|opus)$/i.test(file.name)
+}
+
+function extOf(name: string, fallback: string) {
+  const i = name.lastIndexOf('.')
+  if (i < 0) return fallback
+  const ext = name.slice(i).toLowerCase()
+  if (ext.length > 8) return fallback
+  return ext
+}
+
+function toU8(data: string | Uint8Array): Uint8Array {
+  if (typeof data === 'string') return new TextEncoder().encode(data)
+  return data instanceof Uint8Array ? data : new Uint8Array(data)
 }
 
 function BrandMark() {
@@ -36,6 +59,7 @@ function BrandMark() {
 
 export default function App() {
   const ffmpegRef = useRef<FFmpeg | null>(null)
+  const logsRef = useRef<string[]>([])
   const [ready, setReady] = useState(false)
   const [loadingEngine, setLoadingEngine] = useState(true)
   const [video, setVideo] = useState<File | null>(null)
@@ -58,16 +82,19 @@ export default function App() {
       try {
         const ffmpeg = new FFmpeg()
         ffmpegRef.current = ffmpeg
+        logsRef.current = []
+
         ffmpeg.on('log', ({ message }) => {
-          if (message.toLowerCase().includes('error')) {
-            console.warn(message)
-          }
+          logsRef.current.push(message)
+          if (logsRef.current.length > 80) logsRef.current.shift()
         })
         ffmpeg.on('progress', ({ progress: p }) => {
-          if (!cancelled) setProgress(Math.min(99, Math.round(p * 100)))
+          if (!cancelled && Number.isFinite(p)) {
+            setProgress(Math.min(99, Math.max(0, Math.round(p * 100))))
+          }
         })
 
-        const baseURL = 'https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.6/dist/esm'
+        const baseURL = 'https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.10/dist/esm'
         await ffmpeg.load({
           coreURL: await toBlobURL(`${baseURL}/ffmpeg-core.js`, 'text/javascript'),
           wasmURL: await toBlobURL(`${baseURL}/ffmpeg-core.wasm`, 'application/wasm'),
@@ -82,8 +109,9 @@ export default function App() {
         console.error(err)
         if (!cancelled) {
           setLoadingEngine(false)
+          setReady(false)
           setError(
-            'Impossibile caricare il motore video. Ricarica la pagina o prova un altro browser (Chrome/Edge).',
+            'Motore video non disponibile. Apri in Chrome o Edge (su iPhone Safari a volte non funziona). Ricarica la pagina.',
           )
           setStatus('')
         }
@@ -119,52 +147,102 @@ export default function App() {
       if (prev) URL.revokeObjectURL(prev)
       return null
     })
+    setProgress(0)
+
     if (kind === 'video') {
-      if (!file.type.startsWith('video/')) {
+      if (!isVideoFile(file)) {
         setError('Seleziona un file video (mp4, webm, mov…).')
         return
       }
-      setVideo(file)
-    } else {
-      if (!file.type.startsWith('audio/') && !/\.(mp3|wav|m4a|aac|ogg|flac)$/i.test(file.name)) {
-        setError('Seleziona un file audio (mp3, wav, m4a…).')
+      if (file.size > 200 * 1024 * 1024) {
+        setError('Video troppo grande (max circa 200 MB). Prova a comprimerlo.')
         return
       }
-      setAudio(file)
+      setVideo(file)
+      return
     }
+
+    if (!isAudioFile(file)) {
+      setError('Seleziona un file audio (mp3, wav, m4a…). Non da Spotify.')
+      return
+    }
+    if (file.size > 50 * 1024 * 1024) {
+      setError('Audio troppo grande (max circa 50 MB).')
+      return
+    }
+    setAudio(file)
   }
 
-  function onDrop(kind: 'video' | 'audio', e: React.DragEvent) {
+  function onDrop(kind: 'video' | 'audio', e: DragEvent) {
     e.preventDefault()
     setDragOver(null)
     pickFile(kind, e.dataTransfer.files?.[0])
   }
 
+  async function runFfmpeg(args: string[]) {
+    const ffmpeg = ffmpegRef.current
+    if (!ffmpeg) throw new Error('Motore non pronto')
+    logsRef.current = []
+    const code = await ffmpeg.exec(args)
+    if (code !== 0) {
+      const tail = logsRef.current.slice(-12).join('\n')
+      throw new Error(tail || `FFmpeg exit ${code}`)
+    }
+  }
+
   async function mix() {
-    if (!video || !audio || !ffmpegRef.current || !ready) return
+    if (!video || !audio || !ffmpegRef.current || !ready || busy) return
 
     setBusy(true)
     setError(null)
-    setProgress(0)
+    setProgress(1)
     setStatus('Preparazione file…')
 
     const ffmpeg = ffmpegRef.current
     const videoName = 'input_video' + extOf(video.name, '.mp4')
     const audioName = 'input_audio' + extOf(audio.name, '.mp3')
     const outName = 'output.mp4'
+    const musicVol = Math.max(0.05, musicVolume / 100)
+    const origVol = Math.max(0, originalVolume / 100)
+
+    const cleanupNames = [videoName, audioName, outName]
 
     try {
+      // Clear previous virtual FS leftovers
+      for (const name of cleanupNames) {
+        try {
+          await ffmpeg.deleteFile(name)
+        } catch {
+          /* ok */
+        }
+      }
+
       await ffmpeg.writeFile(videoName, await fetchFile(video))
       await ffmpeg.writeFile(audioName, await fetchFile(audio))
+      setStatus('Unione in corso… può richiedere un minuto')
 
-      const musicVol = Math.max(0.01, musicVolume / 100)
-      const origVol = Math.max(0, originalVolume / 100)
+      const commonOut = [
+        '-c:v',
+        'libx264',
+        '-preset',
+        'ultrafast',
+        '-crf',
+        '28',
+        '-pix_fmt',
+        'yuv420p',
+        '-c:a',
+        'aac',
+        '-b:a',
+        '192k',
+        '-movflags',
+        '+faststart',
+        '-shortest',
+        outName,
+      ]
 
-      setStatus('Unione in corso…')
-
-      let args: string[]
+      // Prefer re-encode: phone HEVC/MOV + copy often fails or won't play in browser
       if (mode === 'replace') {
-        args = [
+        await runFfmpeg([
           '-i',
           videoName,
           '-stream_loop',
@@ -177,67 +255,28 @@ export default function App() {
           '0:v:0',
           '-map',
           '[a]',
-          '-c:v',
-          'copy',
-          '-c:a',
-          'aac',
-          '-b:a',
-          '192k',
-          '-shortest',
-          '-movflags',
-          '+faststart',
-          outName,
-        ]
+          ...commonOut,
+        ])
       } else {
-        args = [
-          '-i',
-          videoName,
-          '-stream_loop',
-          '-1',
-          '-i',
-          audioName,
-          '-filter_complex',
-          `[0:a]volume=${origVol}[a0];[1:a]volume=${musicVol}[a1];[a0][a1]amix=inputs=2:duration=first:dropout_transition=2[a]`,
-          '-map',
-          '0:v:0',
-          '-map',
-          '[a]',
-          '-c:v',
-          'copy',
-          '-c:a',
-          'aac',
-          '-b:a',
-          '192k',
-          '-shortest',
-          '-movflags',
-          '+faststart',
-          outName,
-        ]
-      }
-
-      await ffmpeg.exec(args)
-
-      const data = await ffmpeg.readFile(outName)
-      const bytes =
-        typeof data === 'string' ? new TextEncoder().encode(data) : new Uint8Array(data)
-      const blob = new Blob([bytes], { type: 'video/mp4' })
-      const url = URL.createObjectURL(blob)
-
-      setResultUrl((prev) => {
-        if (prev) URL.revokeObjectURL(prev)
-        return url
-      })
-      setProgress(100)
-      setStatus('Fatto! Scarica o rivedi il video.')
-    } catch (err) {
-      console.error(err)
-      // Fallback: if mix fails (e.g. no original audio track), try replace
-      if (mode === 'mix') {
-        setStatus('Il video non ha audio originale: sostituisco con la musica…')
         try {
-          await ffmpeg.deleteFile(outName).catch(() => undefined)
-          const musicVol = Math.max(0.01, musicVolume / 100)
-          await ffmpeg.exec([
+          await runFfmpeg([
+            '-i',
+            videoName,
+            '-stream_loop',
+            '-1',
+            '-i',
+            audioName,
+            '-filter_complex',
+            `[0:a]volume=${origVol}[a0];[1:a]volume=${musicVol}[a1];[a0][a1]amix=inputs=2:duration=first:dropout_transition=2[a]`,
+            '-map',
+            '0:v:0',
+            '-map',
+            '[a]',
+            ...commonOut,
+          ])
+        } catch {
+          setStatus('Nessun audio nel video: uso solo la musica…')
+          await runFfmpeg([
             '-i',
             videoName,
             '-stream_loop',
@@ -250,50 +289,56 @@ export default function App() {
             '0:v:0',
             '-map',
             '[a]',
-            '-c:v',
-            'copy',
-            '-c:a',
-            'aac',
-            '-b:a',
-            '192k',
-            '-shortest',
-            '-movflags',
-            '+faststart',
-            outName,
+            ...commonOut,
           ])
-          const data = await ffmpeg.readFile(outName)
-          const bytes =
-            typeof data === 'string' ? new TextEncoder().encode(data) : new Uint8Array(data)
-          const blob = new Blob([bytes], { type: 'video/mp4' })
-          const url = URL.createObjectURL(blob)
-          setResultUrl((prev) => {
-            if (prev) URL.revokeObjectURL(prev)
-            return url
-          })
-          setProgress(100)
-          setStatus('Fatto! (musica sostituita: il video non aveva audio).')
-        } catch (err2) {
-          console.error(err2)
-          setError('Elaborazione fallita. Prova con MP4 + MP3, file più leggeri.')
-          setStatus('')
         }
-      } else {
-        setError('Elaborazione fallita. Prova con MP4 + MP3, file più leggeri.')
-        setStatus('')
       }
+
+      const data = await ffmpeg.readFile(outName)
+      const bytes = toU8(data)
+      const copy = new Uint8Array(bytes.byteLength)
+      copy.set(bytes)
+      const blob = new Blob([copy], { type: 'video/mp4' })
+      if (blob.size < 1000) {
+        throw new Error('Output vuoto o troppo piccolo')
+      }
+
+      const url = URL.createObjectURL(blob)
+      setResultUrl((prev) => {
+        if (prev) URL.revokeObjectURL(prev)
+        return url
+      })
+      setProgress(100)
+      setStatus('Fatto! Guarda l’anteprima e scarica l’MP4.')
+    } catch (err) {
+      console.error(err)
+      const detail = err instanceof Error ? err.message : String(err)
+      const hint = detail.includes('SharedArrayBuffer')
+        ? 'Browser non supportato.'
+        : 'Prova MP4 + MP3 più leggeri, oppure Chrome/Edge.'
+      setError(`Elaborazione fallita. ${hint}`)
+      setStatus('')
     } finally {
-      try {
-        await ffmpeg.deleteFile(videoName)
-        await ffmpeg.deleteFile(audioName)
-        await ffmpeg.deleteFile(outName)
-      } catch {
-        /* ignore cleanup errors */
+      for (const name of cleanupNames) {
+        try {
+          await ffmpeg.deleteFile(name)
+        } catch {
+          /* ignore */
+        }
       }
       setBusy(false)
     }
   }
 
   const canMix = Boolean(video && audio && ready && !busy)
+
+  let help = ''
+  if (!ready && loadingEngine) help = 'Attendi: sto caricando il motore video…'
+  else if (!ready) help = 'Motore non pronto: ricarica o usa Chrome/Edge.'
+  else if (!video && !audio) help = 'Carica un video e un file audio (MP3/M4A), poi premi il pulsante.'
+  else if (!video) help = 'Manca il video.'
+  else if (!audio) help = 'Manca la musica (file audio sul telefono, non Spotify).'
+  else if (busy) help = 'Elaborazione in corso…'
 
   return (
     <main className="app">
@@ -319,7 +364,7 @@ export default function App() {
             onDragLeave={() => setDragOver(null)}
             onDrop={(e) => onDrop('video', e)}
           >
-            <p className="drop-label">Video</p>
+            <p className="drop-label">1 · Video</p>
             <p className="drop-hint">Trascina o clicca · MP4, WebM, MOV</p>
             {video && (
               <div className="file-chip">
@@ -330,7 +375,7 @@ export default function App() {
             )}
             <input
               type="file"
-              accept="video/*"
+              accept="video/*,.mp4,.mov,.webm,.m4v"
               onChange={(e) => pickFile('video', e.target.files?.[0])}
             />
           </label>
@@ -344,8 +389,8 @@ export default function App() {
             onDragLeave={() => setDragOver(null)}
             onDrop={(e) => onDrop('audio', e)}
           >
-            <p className="drop-label">Musica</p>
-            <p className="drop-hint">Trascina o clicca · MP3, WAV, M4A</p>
+            <p className="drop-label">2 · Musica</p>
+            <p className="drop-hint">File MP3 / WAV / M4A (non da Spotify)</p>
             {audio && (
               <div className="file-chip">
                 <span>
@@ -411,9 +456,14 @@ export default function App() {
           )}
 
           <div className="actions">
-            <button className="btn btn-primary" disabled={!canMix} onClick={() => void mix()}>
+            <button
+              type="button"
+              className="btn btn-primary"
+              disabled={!canMix}
+              onClick={() => void mix()}
+            >
               {busy && <span className="spinner" aria-hidden />}
-              {busy ? 'Elaborazione…' : 'Metti la musica'}
+              {busy ? 'Elaborazione…' : '3 · Metti la musica'}
             </button>
             {resultUrl && (
               <a className="btn btn-ghost" href={resultUrl} download="ritmo-video.mp4">
@@ -424,12 +474,12 @@ export default function App() {
 
           {(busy || progress > 0) && (
             <div className="progress" aria-hidden>
-              <i style={{ width: `${progress}%` }} />
+              <i style={{ width: `${Math.max(progress, busy ? 5 : 0)}%` }} />
             </div>
           )}
 
           <p className={`status ${error ? 'error' : ''}`}>
-            {error ?? (loadingEngine ? 'Caricamento motore video…' : status)}
+            {error ?? (help || status)}
           </p>
         </section>
       </div>
@@ -439,12 +489,4 @@ export default function App() {
       </p>
     </main>
   )
-}
-
-function extOf(name: string, fallback: string) {
-  const i = name.lastIndexOf('.')
-  if (i < 0) return fallback
-  const ext = name.slice(i).toLowerCase()
-  if (ext.length > 8) return fallback
-  return ext
 }
