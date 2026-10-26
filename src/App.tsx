@@ -53,6 +53,29 @@ function toU8(data: string | Uint8Array): Uint8Array {
   return data instanceof Uint8Array ? data : new Uint8Array(data)
 }
 
+function isMobileDevice() {
+  if (typeof navigator === 'undefined') return false
+  return /iPhone|iPad|iPod|Android/i.test(navigator.userAgent)
+}
+
+function yieldUI() {
+  return new Promise<void>((resolve) => {
+    setTimeout(resolve, 40)
+  })
+}
+
+/** Soft limit: phones kill the PWA when FFmpeg holds huge videos in RAM. */
+function musicVideoLimitBytes() {
+  return isMobileDevice() ? 45 * 1024 * 1024 : 180 * 1024 * 1024
+}
+
+function blobFromU8(bytes: Uint8Array, type: string) {
+  // Avoid an extra full RAM copy when the underlying buffer is a plain ArrayBuffer
+  const view = new Uint8Array(bytes.byteLength)
+  view.set(bytes)
+  return new Blob([view], { type })
+}
+
 function BrandMark() {
   return (
     <div className="brand-mark" aria-hidden>
@@ -223,14 +246,28 @@ export default function App() {
     }
   }
 
-  async function finishOutput(outName: string, downloadName: string) {
+  async function finishOutput(outName: string, downloadName: string, purgeInputs: string[] = []) {
     const ffmpeg = ffmpegRef.current!
+    // Free MEMFS inputs before reading output (critical on iPhone RAM)
+    for (const name of purgeInputs) {
+      try {
+        await ffmpeg.deleteFile(name)
+      } catch {
+        /* ok */
+      }
+    }
+    await yieldUI()
+
     const data = await ffmpeg.readFile(outName)
     const bytes = toU8(data)
-    const copy = new Uint8Array(bytes.byteLength)
-    copy.set(bytes)
-    const blob = new Blob([copy], { type: 'video/mp4' })
+    const blob = blobFromU8(bytes, 'video/mp4')
     if (blob.size < 1000) throw new Error('Output vuoto o troppo piccolo')
+
+    try {
+      await ffmpeg.deleteFile(outName)
+    } catch {
+      /* ok */
+    }
 
     const url = URL.createObjectURL(blob)
     setResultUrl((prev) => {
@@ -301,7 +338,7 @@ export default function App() {
       )
 
       await runFfmpeg(args)
-      const blob = await finishOutput(outName, 'nastro-compresso.mp4')
+      const blob = await finishOutput(outName, 'nastro-compresso.mp4', [videoName])
       if (video.size > 0 && blob.size < video.size) {
         const saved = Math.round((1 - blob.size / video.size) * 100)
         setStatus(`Fatto! Circa ${saved}% più leggero. Scarica l’MP4.`)
@@ -325,13 +362,24 @@ export default function App() {
   async function mixMusic() {
     if (!video || !audio || !ffmpegRef.current || !ready || busy) return
 
+    const limit = musicVideoLimitBytes()
+    if (video.size > limit) {
+      setError(
+        `Video troppo pesante per la musica su questo telefono (${formatBytes(video.size)}). Vai su Comprimi (720p / Compatta), scarica il file leggero, poi torna qui.`,
+      )
+      setStatus('')
+      return
+    }
+
     setBusy(true)
     setError(null)
     setProgress(1)
     setStatus('Preparazione file…')
+    await yieldUI()
 
     const ffmpeg = ffmpegRef.current
-    const videoName = 'input_video' + extOf(video.name, '.mp4')
+    // Always remux to mp4 names — avoids weird MOV/HEVC path issues
+    const videoName = 'input_video.mp4'
     const audioName = 'input_audio' + extOf(audio.name, '.mp3')
     const outName = 'output.mp4'
     const musicVol = Math.max(0.05, musicVolume / 100)
@@ -347,20 +395,22 @@ export default function App() {
         }
       }
 
-      setStatus('Caricamento file nel motore…')
-      await ffmpeg.writeFile(videoName, await fetchFile(video))
+      setStatus('Caricamento audio…')
+      await yieldUI()
       await ffmpeg.writeFile(audioName, await fetchFile(audio))
-      setStatus(
-        video.size > 80 * 1024 * 1024
-          ? 'Unione in corso su video grande… attendi'
-          : 'Unione in corso… può richiedere un minuto',
-      )
 
-      const audioOnlyReplace = [
+      setStatus('Caricamento video…')
+      await yieldUI()
+      await ffmpeg.writeFile(videoName, await fetchFile(video))
+
+      setStatus('Unione leggera (senza ricodificare il video)…')
+      await yieldUI()
+
+      // Mobile-safe: copy video stream only (re-encode OOM-kills iOS PWAs).
+      // No infinite stream_loop (hangs/crashes wasm on phones).
+      const replaceArgs = [
         '-i',
         videoName,
-        '-stream_loop',
-        '-1',
         '-i',
         audioName,
         '-filter_complex',
@@ -369,85 +419,60 @@ export default function App() {
         '0:v:0',
         '-map',
         '[a]',
-      ] as const
-
-      const audioMix = [
-        '-i',
-        videoName,
-        '-stream_loop',
-        '-1',
-        '-i',
-        audioName,
-        '-filter_complex',
-        `[0:a]volume=${origVol}[a0];[1:a]volume=${musicVol}[a1];[a0][a1]amix=inputs=2:duration=first:dropout_transition=2[a]`,
-        '-map',
-        '0:v:0',
-        '-map',
-        '[a]',
-      ] as const
-
-      const copyTail = [
         '-c:v',
         'copy',
         '-c:a',
         'aac',
         '-b:a',
-        '192k',
+        '160k',
         '-movflags',
         '+faststart',
         '-shortest',
         outName,
       ]
-
-      const encodeTail = [
-        '-c:v',
-        'libx264',
-        '-preset',
-        'ultrafast',
-        '-crf',
-        '28',
-        '-pix_fmt',
-        'yuv420p',
-        '-c:a',
-        'aac',
-        '-b:a',
-        '192k',
-        '-movflags',
-        '+faststart',
-        '-shortest',
-        outName,
-      ]
-
-      async function tryMix(base: readonly string[]) {
-        try {
-          await runFfmpeg([...base, ...copyTail])
-        } catch {
-          try {
-            await ffmpeg.deleteFile(outName)
-          } catch {
-            /* ok */
-          }
-          setStatus('Ricodifica video… un po’ più lenta, attendi')
-          await runFfmpeg([...base, ...encodeTail])
-        }
-      }
 
       if (mixMode === 'replace') {
-        await tryMix(audioOnlyReplace)
+        await runFfmpeg(replaceArgs)
       } else {
         try {
-          await tryMix(audioMix)
+          await runFfmpeg([
+            '-i',
+            videoName,
+            '-i',
+            audioName,
+            '-filter_complex',
+            `[0:a]volume=${origVol}[a0];[1:a]volume=${musicVol}[a1];[a0][a1]amix=inputs=2:duration=first:dropout_transition=2[a]`,
+            '-map',
+            '0:v:0',
+            '-map',
+            '[a]',
+            '-c:v',
+            'copy',
+            '-c:a',
+            'aac',
+            '-b:a',
+            '160k',
+            '-movflags',
+            '+faststart',
+            '-shortest',
+            outName,
+          ])
         } catch {
-          setStatus('Nessun audio nel video: uso solo la musica…')
-          await tryMix(audioOnlyReplace)
+          setStatus('Mix non riuscito: uso solo la musica…')
+          await yieldUI()
+          await runFfmpeg(replaceArgs)
         }
       }
 
-      await finishOutput(outName, 'nastro-musica.mp4')
+      await finishOutput(outName, 'nastro-musica.mp4', [videoName, audioName])
       setStatus('Fatto! Guarda l’anteprima e scarica l’MP4.')
     } catch (err) {
       console.error(err)
-      setError('Elaborazione fallita. Prova MP4 + MP3, oppure Chrome/Edge.')
+      setError(
+        isMobileDevice()
+          ? 'Il telefono ha esaurito la memoria. Comprimi prima il video (720p), poi riprova Musica.'
+          : 'Elaborazione fallita. Prova MP4 + MP3 più leggeri.',
+      )
       setStatus('')
     } finally {
       for (const name of cleanupNames) {
@@ -462,7 +487,9 @@ export default function App() {
   }
 
   const canCompress = Boolean(video && ready && !busy)
-  const canMix = Boolean(video && audio && ready && !busy)
+  const canMix = Boolean(
+    video && audio && ready && !busy && video.size <= musicVideoLimitBytes(),
+  )
 
   let help = ''
   if (!ready && loadingEngine) help = 'Attendi: sto caricando il motore video…'
@@ -470,10 +497,15 @@ export default function App() {
   else if (tab === 'compress') {
     if (!video) help = 'Carica un video, scegli qualità/FPS e premi Comprimi.'
     else if (busy) help = 'Compressione in corso…'
-  } else if (!video && !audio) help = 'Carica video + file audio (MP3/M4A), poi premi il pulsante.'
+  }   else if (!video && !audio)
+    help = isMobileDevice()
+      ? 'Su telefono: prima Comprimi a 720p, poi qui carica video leggero + MP3.'
+      : 'Carica video + file audio (MP3/M4A), poi premi il pulsante.'
   else if (!video) help = 'Manca il video.'
   else if (!audio) help = 'Manca la musica (file sul telefono, non Spotify).'
-  else if (busy) help = 'Elaborazione in corso…'
+  else if (video.size > musicVideoLimitBytes())
+    help = `Questo video (${formatBytes(video.size)}) è troppo pesante: comprimilo prima.`
+  else if (busy) help = 'Elaborazione in corso… non chiudere l’app.'
 
   return (
     <main className="app">
