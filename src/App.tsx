@@ -154,20 +154,17 @@ export default function App() {
         setError('Seleziona un file video (mp4, webm, mov…).')
         return
       }
-      if (file.size > 200 * 1024 * 1024) {
-        setError('Video troppo grande (max circa 200 MB). Prova a comprimerlo.')
-        return
-      }
       setVideo(file)
+      if (file.size > 80 * 1024 * 1024) {
+        setStatus(
+          `Video da ${formatBytes(file.size)}: l’elaborazione può richiedere diversi minuti e più memoria.`,
+        )
+      }
       return
     }
 
     if (!isAudioFile(file)) {
       setError('Seleziona un file audio (mp3, wav, m4a…). Non da Spotify.')
-      return
-    }
-    if (file.size > 50 * 1024 * 1024) {
-      setError('Audio troppo grande (max circa 50 MB).')
       return
     }
     setAudio(file)
@@ -217,11 +214,59 @@ export default function App() {
         }
       }
 
+      setStatus('Caricamento file nel motore…')
       await ffmpeg.writeFile(videoName, await fetchFile(video))
       await ffmpeg.writeFile(audioName, await fetchFile(audio))
-      setStatus('Unione in corso… può richiedere un minuto')
+      setStatus(
+        video.size > 80 * 1024 * 1024
+          ? 'Unione in corso su video grande… attendi senza chiudere la pagina'
+          : 'Unione in corso… può richiedere un minuto',
+      )
 
-      const commonOut = [
+      const audioOnlyReplace = [
+        '-i',
+        videoName,
+        '-stream_loop',
+        '-1',
+        '-i',
+        audioName,
+        '-filter_complex',
+        `[1:a]volume=${musicVol}[a]`,
+        '-map',
+        '0:v:0',
+        '-map',
+        '[a]',
+      ] as const
+
+      const audioMix = [
+        '-i',
+        videoName,
+        '-stream_loop',
+        '-1',
+        '-i',
+        audioName,
+        '-filter_complex',
+        `[0:a]volume=${origVol}[a0];[1:a]volume=${musicVol}[a1];[a0][a1]amix=inputs=2:duration=first:dropout_transition=2[a]`,
+        '-map',
+        '0:v:0',
+        '-map',
+        '[a]',
+      ] as const
+
+      const copyTail = [
+        '-c:v',
+        'copy',
+        '-c:a',
+        'aac',
+        '-b:a',
+        '192k',
+        '-movflags',
+        '+faststart',
+        '-shortest',
+        outName,
+      ]
+
+      const encodeTail = [
         '-c:v',
         'libx264',
         '-preset',
@@ -240,57 +285,30 @@ export default function App() {
         outName,
       ]
 
-      // Prefer re-encode: phone HEVC/MOV + copy often fails or won't play in browser
+      async function tryMix(base: readonly string[]) {
+        // Fast path: keep original video stream (better for large phone videos)
+        try {
+          await runFfmpeg([...base, ...copyTail])
+          return
+        } catch {
+          try {
+            await ffmpeg.deleteFile(outName)
+          } catch {
+            /* ok */
+          }
+          setStatus('Ricodifica video… un po’ più lenta, attendi')
+          await runFfmpeg([...base, ...encodeTail])
+        }
+      }
+
       if (mode === 'replace') {
-        await runFfmpeg([
-          '-i',
-          videoName,
-          '-stream_loop',
-          '-1',
-          '-i',
-          audioName,
-          '-filter_complex',
-          `[1:a]volume=${musicVol}[a]`,
-          '-map',
-          '0:v:0',
-          '-map',
-          '[a]',
-          ...commonOut,
-        ])
+        await tryMix(audioOnlyReplace)
       } else {
         try {
-          await runFfmpeg([
-            '-i',
-            videoName,
-            '-stream_loop',
-            '-1',
-            '-i',
-            audioName,
-            '-filter_complex',
-            `[0:a]volume=${origVol}[a0];[1:a]volume=${musicVol}[a1];[a0][a1]amix=inputs=2:duration=first:dropout_transition=2[a]`,
-            '-map',
-            '0:v:0',
-            '-map',
-            '[a]',
-            ...commonOut,
-          ])
+          await tryMix(audioMix)
         } catch {
           setStatus('Nessun audio nel video: uso solo la musica…')
-          await runFfmpeg([
-            '-i',
-            videoName,
-            '-stream_loop',
-            '-1',
-            '-i',
-            audioName,
-            '-filter_complex',
-            `[1:a]volume=${musicVol}[a]`,
-            '-map',
-            '0:v:0',
-            '-map',
-            '[a]',
-            ...commonOut,
-          ])
+          await tryMix(audioOnlyReplace)
         }
       }
 
