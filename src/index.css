@@ -1,0 +1,73 @@
+:root {
+  --bg-deep: #061816;
+  --bg-mid: #0b2e2a;
+  --bg-lift: #123f39;
+  --foam: #e8f2ef;
+  --foam-dim: #a8c4bc;
+  --amber: #f0b429;
+  --amber-hot: #ffc94a;
+  --coral: #e07a5f;
+  --line: rgba(232, 242, 239, 0.12);
+  --shadow: 0 24px 60px rgba(0, 0, 0, 0.45);
+  --radius: 18px;
+  --font-display: 'Bricolage Grotesque', Georgia, serif;
+  --font-body: 'Figtree', system-ui, sans-serif;
+  color: var(--foam);
+  background: var(--bg-deep);
+  font-family: var(--font-body);
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  min-height: 100%;
+}
+
+body {
+  margin: 0;
+  min-width: 320px;
+  background:
+    radial-gradient(ellipse 90% 60% at 10% -10%, rgba(240, 180, 41, 0.18), transparent 55%),
+    radial-gradient(ellipse 70% 50% at 95% 15%, rgba(45, 140, 120, 0.35), transparent 50%),
+    radial-gradient(ellipse 60% 40% at 50% 100%, rgba(224, 122, 95, 0.12), transparent 55%),
+    linear-gradient(165deg, #082421 0%, var(--bg-deep) 45%, #041210 100%);
+  background-attachment: fixed;
+}
+
+body::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  opacity: 0.045;
+  background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+  z-index: 0;
+}
+
+#root {
+  position: relative;
+  z-index: 1;
+}
+
+button,
+input,
+select {
+  font: inherit;
+}
+
+button {
+  cursor: pointer;
+}
+
+a {
+  color: var(--amber);
+}
