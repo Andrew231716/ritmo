@@ -131,9 +131,15 @@ export function trackPageUrl(track: AudioComTrack) {
   return `https://audio.com/search?q=${encodeURIComponent(track.title || '')}`
 }
 
-/** Preview URL: prefer official stream, via same-origin redirect proxy. */
+/** Official Audio.com stream URL (may be on S3 / CDN). */
+export function trackPlayUrl(track: AudioComTrack) {
+  const url = track.play?.url?.trim()
+  return url || null
+}
+
+/** Same-origin proxy — fallback when the browser blocks the direct CDN URL (COEP). */
 export function trackPreviewSrc(track: AudioComTrack) {
-  const url = track.play?.url
+  const url = trackPlayUrl(track)
   if (!url) return null
   return `/api/audio-preview?url=${encodeURIComponent(url)}`
 }

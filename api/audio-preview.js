@@ -14,15 +14,38 @@ function hostAllowed(raw) {
     if (u.protocol !== 'https:') return false
     const host = u.hostname.toLowerCase()
     if (ALLOWED_HOSTS.has(host)) return true
-    return host.endsWith('.audio.com') || host.endsWith('.amazonaws.com')
+    return (
+      host.endsWith('.audio.com') ||
+      host.endsWith('.amazonaws.com') ||
+      host.endsWith('.cloudfront.net') ||
+      host.endsWith('.r2.dev')
+    )
   } catch {
     return false
   }
 }
 
+async function fetchPreview(url) {
+  // Prefer a ranged request (short clip). Some CDNs ignore Range — we still slice.
+  const ranged = await fetch(String(url), {
+    headers: {
+      Accept: 'audio/*,*/*',
+      Range: `bytes=0-${PREVIEW_MAX_BYTES - 1}`,
+    },
+    redirect: 'follow',
+  })
+  if (ranged.ok || ranged.status === 206) return ranged
+
+  const full = await fetch(String(url), {
+    headers: { Accept: 'audio/*,*/*' },
+    redirect: 'follow',
+  })
+  return full
+}
+
 /**
  * Same-origin proxy for Audio.com stream URLs.
- * Redirects break under COEP; proxying lets <audio> play in-app.
+ * Used as fallback when the browser cannot play the CDN URL under COEP.
  */
 export default async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Origin', req.headers.origin || '*')
@@ -38,16 +61,11 @@ export default async function handler(req, res) {
       return res.status(400).json({ error: 'URL anteprima non valido' })
     }
 
-    const upstream = await fetch(String(url), {
-      headers: {
-        Accept: 'audio/*,*/*',
-        Range: `bytes=0-${PREVIEW_MAX_BYTES - 1}`,
-      },
-      redirect: 'follow',
-    })
-
+    const upstream = await fetchPreview(url)
     if (!(upstream.ok || upstream.status === 206)) {
-      return res.status(upstream.status).json({ error: 'Anteprima Audio.com non disponibile' })
+      return res
+        .status(upstream.status)
+        .json({ error: 'Anteprima Audio.com non disponibile' })
     }
 
     const raw = Buffer.from(await upstream.arrayBuffer())
@@ -57,10 +75,9 @@ export default async function handler(req, res) {
     }
 
     const type = upstream.headers.get('content-type') || 'audio/mpeg'
-    res.setHeader('Content-Type', type)
+    res.setHeader('Content-Type', type.split(';')[0].trim() || 'audio/mpeg')
     res.setHeader('Cache-Control', 'private, max-age=120')
     res.setHeader('Accept-Ranges', 'none')
-    // Always 200 so <audio> treats the clip as a complete short file.
     return res.status(200).send(buf)
   } catch (err) {
     return res.status(500).json({ error: err instanceof Error ? err.message : 'Server error' })

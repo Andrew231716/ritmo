@@ -23,6 +23,7 @@ import {
   importAudioComTrack,
   searchAudioCom,
   trackPageUrl,
+  trackPlayUrl,
   trackPreviewSrc,
   type AudioComTrack,
 } from './lib/audioCom'
@@ -730,8 +731,9 @@ export default function App() {
   }
 
   function toggleAudioComPreview(track: AudioComTrack) {
-    const src = trackPreviewSrc(track)
-    if (!src) {
+    const direct = trackPlayUrl(track)
+    const proxied = trackPreviewSrc(track)
+    if (!direct && !proxied) {
       setError(
         lang === 'it'
           ? 'Anteprima non disponibile per questa traccia.'
@@ -747,16 +749,27 @@ export default function App() {
     setAudioComPreviewId(track.id)
     const el = audioComPreviewRef.current
     if (!el) return
-    el.src = src
-    // Call play() inside the click handler so the browser keeps the user gesture.
-    void el.play().catch(() => {
+
+    const fail = () => {
       stopAudioComPreview()
       setError(
         lang === 'it'
           ? 'Anteprima non disponibile per questa traccia.'
           : 'Preview unavailable for this track.',
       )
-    })
+    }
+
+    const tryPlay = (src: string, fallback?: string | null) => {
+      el.src = src
+      // play() must run in the click turn so autoplay policies allow it.
+      void el.play().catch(() => {
+        if (fallback && fallback !== src) tryPlay(fallback, null)
+        else fail()
+      })
+    }
+
+    // Prefer same-origin proxy (works with COEP); fall back to the CDN URL.
+    tryPlay(proxied || direct!, proxied ? direct : null)
   }
 
   async function runAudioComSearch() {
@@ -1263,7 +1276,7 @@ export default function App() {
                     <div className="batch-list" style={{ marginTop: '0.75rem' }}>
                       {audioComResults.map((track) => {
                         const ok = canImportTrack(track)
-                        const preview = trackPreviewSrc(track)
+                        const preview = Boolean(trackPlayUrl(track) || trackPreviewSrc(track))
                         const isPreviewing = audioComPreviewId === track.id
                         return (
                           <div key={track.id} className="batch-item audiocom-result">
