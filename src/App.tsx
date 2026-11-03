@@ -12,16 +12,29 @@ type ResOption = 'original' | '1080' | '720' | '480'
 
 const PRESETS: Record<
   QualityPreset,
-  { label: string; hint: string; crf: number; preset: string }
+  { label: string; hint: string; crf: number; preset: string; mobilePreset: string }
 > = {
-  high: { label: 'Alta', hint: 'Ottima qualità, file più grande', crf: 18, preset: 'slow' },
+  high: {
+    label: 'Alta',
+    hint: 'Ottima qualità, file più grande',
+    crf: 18,
+    preset: 'medium',
+    mobilePreset: 'veryfast',
+  },
   balanced: {
     label: 'Bilanciata',
     hint: 'Buona qualità, peso ragionevole',
     crf: 23,
-    preset: 'medium',
+    preset: 'veryfast',
+    mobilePreset: 'ultrafast',
   },
-  small: { label: 'Compatta', hint: 'File più leggero, qualità ok', crf: 28, preset: 'veryfast' },
+  small: {
+    label: 'Compatta',
+    hint: 'File più leggero, qualità ok',
+    crf: 28,
+    preset: 'ultrafast',
+    mobilePreset: 'ultrafast',
+  },
 }
 
 function formatBytes(bytes: number) {
@@ -70,10 +83,21 @@ function musicVideoLimitBytes() {
 }
 
 function blobFromU8(bytes: Uint8Array, type: string) {
-  // Avoid an extra full RAM copy when the underlying buffer is a plain ArrayBuffer
   const view = new Uint8Array(bytes.byteLength)
   view.set(bytes)
   return new Blob([view], { type })
+}
+
+async function requestWakeLock() {
+  try {
+    const nav = navigator as Navigator & {
+      wakeLock?: { request: (type: 'screen') => Promise<{ release: () => Promise<void> }> }
+    }
+    if (!nav.wakeLock) return null
+    return await nav.wakeLock.request('screen')
+  } catch {
+    return null
+  }
 }
 
 function BrandMark() {
@@ -102,6 +126,8 @@ function BrandMark() {
 export default function App() {
   const ffmpegRef = useRef<FFmpeg | null>(null)
   const logsRef = useRef<string[]>([])
+  const videoUrlRef = useRef<string | null>(null)
+  const resultUrlRef = useRef<string | null>(null)
   const [ready, setReady] = useState(false)
   const [loadingEngine, setLoadingEngine] = useState(true)
   const [tab, setTab] = useState<AppTab>('compress')
@@ -111,6 +137,7 @@ export default function App() {
   const [videoUrl, setVideoUrl] = useState<string | null>(null)
   const [resultUrl, setResultUrl] = useState<string | null>(null)
   const [resultSize, setResultSize] = useState<number | null>(null)
+  const [resultKind, setResultKind] = useState<'compress' | 'music' | null>(null)
 
   const [musicVolume, setMusicVolume] = useState(80)
   const [originalVolume, setOriginalVolume] = useState(30)
@@ -118,7 +145,9 @@ export default function App() {
 
   const [quality, setQuality] = useState<QualityPreset>('balanced')
   const [fps, setFps] = useState<FpsOption>('original')
-  const [resolution, setResolution] = useState<ResOption>('original')
+  const [resolution, setResolution] = useState<ResOption>(
+    isMobileDevice() ? '720' : 'original',
+  )
   const [crfOverride, setCrfOverride] = useState<number | null>(null)
 
   const [busy, setBusy] = useState(false)
@@ -128,6 +157,7 @@ export default function App() {
   const [dragOver, setDragOver] = useState<'video' | 'audio' | null>(null)
 
   const effectiveCrf = crfOverride ?? PRESETS[quality].crf
+  const mobile = isMobileDevice()
 
   useEffect(() => {
     let cancelled = false
@@ -175,36 +205,46 @@ export default function App() {
     void load()
     return () => {
       cancelled = true
+      if (videoUrlRef.current) URL.revokeObjectURL(videoUrlRef.current)
+      if (resultUrlRef.current) URL.revokeObjectURL(resultUrlRef.current)
     }
   }, [])
 
-  useEffect(() => {
-    if (!video) {
+  function setPreviewVideo(file: File | null) {
+    if (videoUrlRef.current) {
+      URL.revokeObjectURL(videoUrlRef.current)
+      videoUrlRef.current = null
+    }
+    if (!file) {
       setVideoUrl(null)
       return
     }
-    const url = URL.createObjectURL(video)
+    const url = URL.createObjectURL(file)
+    videoUrlRef.current = url
     setVideoUrl(url)
-    return () => URL.revokeObjectURL(url)
-  }, [video])
-
-  useEffect(() => {
-    return () => {
-      if (resultUrl) URL.revokeObjectURL(resultUrl)
-    }
-  }, [resultUrl])
+  }
 
   function clearResult() {
-    setResultUrl((prev) => {
-      if (prev) URL.revokeObjectURL(prev)
-      return null
-    })
+    if (resultUrlRef.current) {
+      URL.revokeObjectURL(resultUrlRef.current)
+      resultUrlRef.current = null
+    }
+    setResultUrl(null)
     setResultSize(null)
+    setResultKind(null)
     setProgress(0)
   }
 
+  function switchTab(next: AppTab) {
+    if (busy) return
+    setTab(next)
+    setError(null)
+    // Keep files; only clear stale preview result when leaving its tab
+    if (resultKind && resultKind !== next) clearResult()
+  }
+
   function pickFile(kind: 'video' | 'audio', file: File | undefined | null) {
-    if (!file) return
+    if (!file || busy) return
     setError(null)
     clearResult()
 
@@ -214,10 +254,13 @@ export default function App() {
         return
       }
       setVideo(file)
+      setPreviewVideo(file)
       if (file.size > 80 * 1024 * 1024) {
         setStatus(
           `Video da ${formatBytes(file.size)}: l’elaborazione può richiedere diversi minuti.`,
         )
+      } else {
+        setStatus('Video caricato.')
       }
       return
     }
@@ -227,6 +270,7 @@ export default function App() {
       return
     }
     setAudio(file)
+    setStatus('Musica caricata.')
   }
 
   function onDrop(kind: 'video' | 'audio', e: DragEvent) {
@@ -246,9 +290,13 @@ export default function App() {
     }
   }
 
-  async function finishOutput(outName: string, downloadName: string, purgeInputs: string[] = []) {
+  async function finishOutput(
+    outName: string,
+    downloadName: string,
+    kind: 'compress' | 'music',
+    purgeInputs: string[] = [],
+  ) {
     const ffmpeg = ffmpegRef.current!
-    // Free MEMFS inputs before reading output (critical on iPhone RAM)
     for (const name of purgeInputs) {
       try {
         await ffmpeg.deleteFile(name)
@@ -270,11 +318,11 @@ export default function App() {
     }
 
     const url = URL.createObjectURL(blob)
-    setResultUrl((prev) => {
-      if (prev) URL.revokeObjectURL(prev)
-      return url
-    })
+    if (resultUrlRef.current) URL.revokeObjectURL(resultUrlRef.current)
+    resultUrlRef.current = url
+    setResultUrl(url)
     setResultSize(blob.size)
+    setResultKind(kind)
     setProgress(100)
     setStatus(`Fatto! Scarica «${downloadName}».`)
     return blob
@@ -287,11 +335,13 @@ export default function App() {
     setError(null)
     setProgress(1)
     setStatus('Preparazione compressione…')
+    const wake = await requestWakeLock()
 
     const ffmpeg = ffmpegRef.current
     const videoName = 'input_video' + extOf(video.name, '.mp4')
     const outName = 'compressed.mp4'
-    const { preset } = PRESETS[quality]
+    const presetCfg = PRESETS[quality]
+    const preset = mobile ? presetCfg.mobilePreset : presetCfg.preset
     const crf = effectiveCrf
 
     try {
@@ -304,12 +354,18 @@ export default function App() {
       }
 
       setStatus('Caricamento video…')
+      await yieldUI()
       await ffmpeg.writeFile(videoName, await fetchFile(video))
-      setStatus('Compressione in corso… non chiudere la pagina')
+      setStatus(
+        mobile
+          ? 'Compressione in corso… tieni lo schermo acceso'
+          : 'Compressione in corso… non chiudere la pagina',
+      )
 
       const filters: string[] = []
       if (resolution !== 'original') {
-        filters.push(`scale=-2:${resolution}`)
+        // even width/height avoids encoder failures on odd sizes
+        filters.push(`scale=-2:'min(${resolution},ih)':flags=fast_bilinear`)
       }
       if (fps !== 'original') {
         filters.push(`fps=${fps}`)
@@ -338,14 +394,14 @@ export default function App() {
       )
 
       await runFfmpeg(args)
-      const blob = await finishOutput(outName, 'nastro-compresso.mp4', [videoName])
+      const blob = await finishOutput(outName, 'nastro-compresso.mp4', 'compress', [videoName])
       if (video.size > 0 && blob.size < video.size) {
         const saved = Math.round((1 - blob.size / video.size) * 100)
-        setStatus(`Fatto! Circa ${saved}% più leggero. Scarica l’MP4.`)
+        setStatus(`Fatto! Circa ${saved}% più leggero. Scarica o usa in Musica.`)
       }
     } catch (err) {
       console.error(err)
-      setError('Compressione fallita. Prova un preset più leggero o Chrome/Edge.')
+      setError('Compressione fallita. Prova Compatta + 720p, oppure Chrome/Edge.')
       setStatus('')
     } finally {
       for (const name of [videoName, outName]) {
@@ -355,8 +411,37 @@ export default function App() {
           /* ignore */
         }
       }
+      try {
+        await wake?.release()
+      } catch {
+        /* ignore */
+      }
       setBusy(false)
     }
+  }
+
+  function useCompressedForMusic() {
+    if (!resultUrl || resultKind !== 'compress') return
+    void (async () => {
+      try {
+        const res = await fetch(resultUrl)
+        const blob = await res.blob()
+        const compressed = new File([blob], 'nastro-compresso.mp4', { type: 'video/mp4' })
+        setVideo(compressed)
+        setPreviewVideo(compressed)
+        clearResult()
+        setTab('music')
+        setError(null)
+        setStatus(
+          compressed.size <= musicVideoLimitBytes()
+            ? 'Video compresso pronto per la musica. Carica un MP3.'
+            : `Ancora pesante (${formatBytes(compressed.size)}): riprova Compatta + 480p.`,
+        )
+      } catch (err) {
+        console.error(err)
+        setError('Non riesco a passare il video a Musica. Scarica e ricaricalo nel tab Musica.')
+      }
+    })()
   }
 
   async function mixMusic() {
@@ -365,7 +450,9 @@ export default function App() {
     const limit = musicVideoLimitBytes()
     if (video.size > limit) {
       setError(
-        `Video troppo pesante per la musica su questo telefono (${formatBytes(video.size)}). Vai su Comprimi (720p / Compatta), scarica il file leggero, poi torna qui.`,
+        mobile
+          ? `Video troppo pesante per la musica sul telefono (${formatBytes(video.size)}). Comprimi a 720p / Compatta, poi usa «Usa in Musica».`
+          : `Video troppo pesante (${formatBytes(video.size)}). Comprimilo prima, poi riprova.`,
       )
       setStatus('')
       return
@@ -376,10 +463,10 @@ export default function App() {
     setProgress(1)
     setStatus('Preparazione file…')
     await yieldUI()
+    const wake = await requestWakeLock()
 
     const ffmpeg = ffmpegRef.current
-    // Always remux to mp4 names — avoids weird MOV/HEVC path issues
-    const videoName = 'input_video.mp4'
+    const videoName = 'input_video' + extOf(video.name, '.mp4')
     const audioName = 'input_audio' + extOf(audio.name, '.mp3')
     const outName = 'output.mp4'
     const musicVol = Math.max(0.05, musicVolume / 100)
@@ -406,8 +493,6 @@ export default function App() {
       setStatus('Unione leggera (senza ricodificare il video)…')
       await yieldUI()
 
-      // Mobile-safe: copy video stream only (re-encode OOM-kills iOS PWAs).
-      // No infinite stream_loop (hangs/crashes wasm on phones).
       const replaceArgs = [
         '-i',
         videoName,
@@ -464,12 +549,12 @@ export default function App() {
         }
       }
 
-      await finishOutput(outName, 'nastro-musica.mp4', [videoName, audioName])
+      await finishOutput(outName, 'nastro-musica.mp4', 'music', [videoName, audioName])
       setStatus('Fatto! Guarda l’anteprima e scarica l’MP4.')
     } catch (err) {
       console.error(err)
       setError(
-        isMobileDevice()
+        mobile
           ? 'Il telefono ha esaurito la memoria. Comprimi prima il video (720p), poi riprova Musica.'
           : 'Elaborazione fallita. Prova MP4 + MP3 più leggeri.',
       )
@@ -481,6 +566,11 @@ export default function App() {
         } catch {
           /* ignore */
         }
+      }
+      try {
+        await wake?.release()
+      } catch {
+        /* ignore */
       }
       setBusy(false)
     }
@@ -497,8 +587,8 @@ export default function App() {
   else if (tab === 'compress') {
     if (!video) help = 'Carica un video, scegli qualità/FPS e premi Comprimi.'
     else if (busy) help = 'Compressione in corso…'
-  }   else if (!video && !audio)
-    help = isMobileDevice()
+  } else if (!video && !audio)
+    help = mobile
       ? 'Su telefono: prima Comprimi a 720p, poi qui carica video leggero + MP3.'
       : 'Carica video + file audio (MP3/M4A), poi premi il pulsante.'
   else if (!video) help = 'Manca il video.'
@@ -520,21 +610,14 @@ export default function App() {
         </p>
       </header>
 
-      <div
-        className="tabs"
-        role="tablist"
-        aria-label="Modalità"
-      >
+      <div className="tabs" role="tablist" aria-label="Modalità">
         <button
           type="button"
           role="tab"
           className={`tab ${tab === 'compress' ? 'active' : ''}`}
           aria-selected={tab === 'compress'}
-          onClick={() => {
-            setTab('compress')
-            setError(null)
-            clearResult()
-          }}
+          disabled={busy}
+          onClick={() => switchTab('compress')}
         >
           Comprimi
         </button>
@@ -543,11 +626,8 @@ export default function App() {
           role="tab"
           className={`tab ${tab === 'music' ? 'active' : ''}`}
           aria-selected={tab === 'music'}
-          onClick={() => {
-            setTab('music')
-            setError(null)
-            clearResult()
-          }}
+          disabled={busy}
+          onClick={() => switchTab('music')}
         >
           Musica
         </button>
@@ -576,6 +656,7 @@ export default function App() {
             <input
               type="file"
               accept="video/*,.mp4,.mov,.webm,.m4v"
+              disabled={busy}
               onChange={(e) => pickFile('video', e.target.files?.[0])}
             />
           </label>
@@ -602,6 +683,7 @@ export default function App() {
               <input
                 type="file"
                 accept="audio/*,.mp3,.wav,.m4a,.aac,.ogg,.flac"
+                disabled={busy}
                 onChange={(e) => pickFile('audio', e.target.files?.[0])}
               />
             </label>
@@ -628,6 +710,7 @@ export default function App() {
                     key={key}
                     type="button"
                     className={`preset ${quality === key ? 'active' : ''}`}
+                    disabled={busy}
                     onClick={() => {
                       setQuality(key)
                       setCrfOverride(null)
@@ -645,6 +728,7 @@ export default function App() {
                   <select
                     id="fps"
                     value={fps}
+                    disabled={busy}
                     onChange={(e) => setFps(e.target.value as FpsOption)}
                   >
                     <option value="original">Come l’originale</option>
@@ -660,6 +744,7 @@ export default function App() {
                   <select
                     id="res"
                     value={resolution}
+                    disabled={busy}
                     onChange={(e) => setResolution(e.target.value as ResOption)}
                   >
                     <option value="original">Come l’originale</option>
@@ -679,6 +764,7 @@ export default function App() {
                   min={15}
                   max={32}
                   value={effectiveCrf}
+                  disabled={busy}
                   onChange={(e) => setCrfOverride(Number(e.target.value))}
                 />
                 <p className="drop-hint">Valori più bassi = qualità più alta e file più grande.</p>
@@ -694,10 +780,20 @@ export default function App() {
                   {busy && tab === 'compress' && <span className="spinner" aria-hidden />}
                   {busy && tab === 'compress' ? 'Compressione…' : 'Comprimi video'}
                 </button>
-                {resultUrl && tab === 'compress' && (
-                  <a className="btn btn-ghost" href={resultUrl} download="nastro-compresso.mp4">
-                    Scarica MP4
-                  </a>
+                {resultUrl && resultKind === 'compress' && (
+                  <>
+                    <a className="btn btn-ghost" href={resultUrl} download="nastro-compresso.mp4">
+                      Scarica MP4
+                    </a>
+                    <button
+                      type="button"
+                      className="btn btn-ghost"
+                      disabled={busy}
+                      onClick={useCompressedForMusic}
+                    >
+                      Usa in Musica
+                    </button>
+                  </>
                 )}
               </div>
             </>
@@ -707,6 +803,7 @@ export default function App() {
                 <input
                   type="checkbox"
                   checked={mixMode === 'mix'}
+                  disabled={busy}
                   onChange={(e) => setMixMode(e.target.checked ? 'mix' : 'replace')}
                 />
                 Mantieni anche l’audio originale del video (mix)
@@ -721,6 +818,7 @@ export default function App() {
                   min={0}
                   max={100}
                   value={musicVolume}
+                  disabled={busy}
                   onChange={(e) => setMusicVolume(Number(e.target.value))}
                 />
               </div>
@@ -735,6 +833,7 @@ export default function App() {
                     min={0}
                     max={100}
                     value={originalVolume}
+                    disabled={busy}
                     onChange={(e) => setOriginalVolume(Number(e.target.value))}
                   />
                 </div>
@@ -750,7 +849,7 @@ export default function App() {
                   {busy && tab === 'music' && <span className="spinner" aria-hidden />}
                   {busy && tab === 'music' ? 'Elaborazione…' : 'Metti la musica'}
                 </button>
-                {resultUrl && tab === 'music' && (
+                {resultUrl && resultKind === 'music' && (
                   <a className="btn btn-ghost" href={resultUrl} download="nastro-musica.mp4">
                     Scarica MP4
                   </a>
