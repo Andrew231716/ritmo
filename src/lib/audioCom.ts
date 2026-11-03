@@ -130,3 +130,10 @@ export function trackPageUrl(track: AudioComTrack) {
   }
   return `https://audio.com/search?q=${encodeURIComponent(track.title || '')}`
 }
+
+/** Preview URL: prefer official stream, via same-origin redirect proxy. */
+export function trackPreviewSrc(track: AudioComTrack) {
+  const url = track.play?.url
+  if (!url) return null
+  return `/api/audio-preview?url=${encodeURIComponent(url)}`
+}

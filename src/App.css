@@ -431,6 +431,17 @@
   background: color-mix(in srgb, var(--bg-deep) 40%, transparent);
 }
 
+.audiocom-result {
+  align-items: flex-start;
+}
+
+.audiocom-preview {
+  display: block;
+  width: min(100%, 360px);
+  margin-top: 0.55rem;
+  height: 36px;
+}
+
 .batch-list {
   display: grid;
   gap: 0.55rem;

@@ -23,6 +23,7 @@ import {
   importAudioComTrack,
   searchAudioCom,
   trackPageUrl,
+  trackPreviewSrc,
   type AudioComTrack,
 } from './lib/audioCom'
 import { t, type Lang } from './lib/i18n'
@@ -150,6 +151,7 @@ export default function App() {
   const [audioComQuery, setAudioComQuery] = useState('')
   const [audioComResults, setAudioComResults] = useState<AudioComTrack[]>([])
   const [audioComBusy, setAudioComBusy] = useState(false)
+  const [audioComPreviewId, setAudioComPreviewId] = useState<string | null>(null)
 
   const [batch, setBatch] = useState<BatchItem[]>([])
   const [busy, setBusy] = useState(false)
@@ -718,6 +720,7 @@ export default function App() {
 
   async function runAudioComSearch() {
     setError(null)
+    setAudioComPreviewId(null)
     setAudioComBusy(true)
     try {
       const results = await searchAudioCom(audioComQuery.trim())
@@ -741,6 +744,7 @@ export default function App() {
 
   async function bringAudioComTrack(track: AudioComTrack) {
     setError(null)
+    setAudioComPreviewId(null)
     setAudioComBusy(true)
     try {
       const file = await importAudioComTrack(track)
@@ -1153,6 +1157,7 @@ export default function App() {
                           clearAudioComAuth()
                           setAudioComAuthed(false)
                           setAudioComResults([])
+                          setAudioComPreviewId(null)
                         }}
                       >
                         {lang === 'it' ? 'Esci Audio.com' : 'Sign out'}
@@ -1197,8 +1202,10 @@ export default function App() {
                     <div className="batch-list" style={{ marginTop: '0.75rem' }}>
                       {audioComResults.map((track) => {
                         const ok = canImportTrack(track)
+                        const preview = trackPreviewSrc(track)
+                        const isPreviewing = audioComPreviewId === track.id
                         return (
-                          <div key={track.id} className="batch-item">
+                          <div key={track.id} className="batch-item audiocom-result">
                             <span>
                               <strong>{track.title}</strong>
                               <br />
@@ -1213,8 +1220,42 @@ export default function App() {
                                     ? 'no download'
                                     : 'no download'}
                               </span>
+                              {isPreviewing && preview && (
+                                <audio
+                                  className="audiocom-preview"
+                                  src={preview}
+                                  controls
+                                  autoPlay
+                                  preload="metadata"
+                                  onEnded={() => setAudioComPreviewId(null)}
+                                  onError={() => {
+                                    setAudioComPreviewId(null)
+                                    setError(
+                                      lang === 'it'
+                                        ? 'Anteprima non disponibile per questa traccia.'
+                                        : 'Preview unavailable for this track.',
+                                    )
+                                  }}
+                                />
+                              )}
                             </span>
                             <span className="actions">
+                              <button
+                                type="button"
+                                className="btn btn-ghost"
+                                disabled={!preview || busy || audioComBusy}
+                                onClick={() =>
+                                  setAudioComPreviewId(isPreviewing ? null : track.id)
+                                }
+                              >
+                                {isPreviewing
+                                  ? lang === 'it'
+                                    ? 'Stop'
+                                    : 'Stop'
+                                  : lang === 'it'
+                                    ? 'Ascolta'
+                                    : 'Preview'}
+                              </button>
                               <a
                                 className="btn btn-ghost"
                                 href={trackPageUrl(track)}
