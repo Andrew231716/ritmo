@@ -437,9 +437,18 @@
 
 .audiocom-preview {
   display: block;
-  width: min(100%, 360px);
-  margin-top: 0.55rem;
+  width: min(100%, 420px);
+  margin-top: 0.75rem;
   height: 36px;
+}
+
+.audiocom-preview-idle {
+  position: absolute;
+  width: 0;
+  height: 0;
+  margin: 0;
+  opacity: 0;
+  pointer-events: none;
 }
 
 .batch-list {

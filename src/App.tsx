@@ -152,6 +152,7 @@ export default function App() {
   const [audioComResults, setAudioComResults] = useState<AudioComTrack[]>([])
   const [audioComBusy, setAudioComBusy] = useState(false)
   const [audioComPreviewId, setAudioComPreviewId] = useState<string | null>(null)
+  const audioComPreviewRef = useRef<HTMLAudioElement | null>(null)
 
   const [batch, setBatch] = useState<BatchItem[]>([])
   const [busy, setBusy] = useState(false)
@@ -718,9 +719,49 @@ export default function App() {
     })
   }
 
+  function stopAudioComPreview() {
+    const el = audioComPreviewRef.current
+    if (el) {
+      el.pause()
+      el.removeAttribute('src')
+      el.load()
+    }
+    setAudioComPreviewId(null)
+  }
+
+  function toggleAudioComPreview(track: AudioComTrack) {
+    const src = trackPreviewSrc(track)
+    if (!src) {
+      setError(
+        lang === 'it'
+          ? 'Anteprima non disponibile per questa traccia.'
+          : 'Preview unavailable for this track.',
+      )
+      return
+    }
+    if (audioComPreviewId === track.id) {
+      stopAudioComPreview()
+      return
+    }
+    setError(null)
+    setAudioComPreviewId(track.id)
+    const el = audioComPreviewRef.current
+    if (!el) return
+    el.src = src
+    // Call play() inside the click handler so the browser keeps the user gesture.
+    void el.play().catch(() => {
+      stopAudioComPreview()
+      setError(
+        lang === 'it'
+          ? 'Anteprima non disponibile per questa traccia.'
+          : 'Preview unavailable for this track.',
+      )
+    })
+  }
+
   async function runAudioComSearch() {
     setError(null)
-    setAudioComPreviewId(null)
+    stopAudioComPreview()
     setAudioComBusy(true)
     try {
       const results = await searchAudioCom(audioComQuery.trim())
@@ -744,7 +785,7 @@ export default function App() {
 
   async function bringAudioComTrack(track: AudioComTrack) {
     setError(null)
-    setAudioComPreviewId(null)
+    stopAudioComPreview()
     setAudioComBusy(true)
     try {
       const file = await importAudioComTrack(track)
@@ -1157,7 +1198,7 @@ export default function App() {
                           clearAudioComAuth()
                           setAudioComAuthed(false)
                           setAudioComResults([])
-                          setAudioComPreviewId(null)
+                          stopAudioComPreview()
                         }}
                       >
                         {lang === 'it' ? 'Esci Audio.com' : 'Sign out'}
@@ -1199,6 +1240,26 @@ export default function App() {
                         </button>
                       </div>
                     </div>
+                    <audio
+                      ref={audioComPreviewRef}
+                      className={
+                        audioComPreviewId
+                          ? 'audiocom-preview'
+                          : 'audiocom-preview audiocom-preview-idle'
+                      }
+                      controls
+                      preload="none"
+                      onEnded={() => setAudioComPreviewId(null)}
+                      onError={() => {
+                        if (!audioComPreviewId) return
+                        stopAudioComPreview()
+                        setError(
+                          lang === 'it'
+                            ? 'Anteprima non disponibile per questa traccia.'
+                            : 'Preview unavailable for this track.',
+                        )
+                      }}
+                    />
                     <div className="batch-list" style={{ marginTop: '0.75rem' }}>
                       {audioComResults.map((track) => {
                         const ok = canImportTrack(track)
@@ -1219,34 +1280,19 @@ export default function App() {
                                   : lang === 'it'
                                     ? 'no download'
                                     : 'no download'}
+                                {isPreviewing
+                                  ? lang === 'it'
+                                    ? ' · in anteprima'
+                                    : ' · playing'
+                                  : ''}
                               </span>
-                              {isPreviewing && preview && (
-                                <audio
-                                  className="audiocom-preview"
-                                  src={preview}
-                                  controls
-                                  autoPlay
-                                  preload="metadata"
-                                  onEnded={() => setAudioComPreviewId(null)}
-                                  onError={() => {
-                                    setAudioComPreviewId(null)
-                                    setError(
-                                      lang === 'it'
-                                        ? 'Anteprima non disponibile per questa traccia.'
-                                        : 'Preview unavailable for this track.',
-                                    )
-                                  }}
-                                />
-                              )}
                             </span>
                             <span className="actions">
                               <button
                                 type="button"
                                 className="btn btn-ghost"
                                 disabled={!preview || busy || audioComBusy}
-                                onClick={() =>
-                                  setAudioComPreviewId(isPreviewing ? null : track.id)
-                                }
+                                onClick={() => toggleAudioComPreview(track)}
                               >
                                 {isPreviewing
                                   ? lang === 'it'
