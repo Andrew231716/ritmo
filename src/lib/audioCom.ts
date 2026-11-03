@@ -120,7 +120,7 @@ export async function importAudioComTrack(track: AudioComTrack) {
     throw new Error(err.error || 'Download fallito')
   }
   const blob = await res.blob()
-  const safe = (track.title || 'audio-com').replace(/[^\w\-]+/g, '_').slice(0, 40)
+  const safe = (track.title || 'audio-com').replace(/[^\w-]+/g, '_').slice(0, 40)
   return new File([blob], `${safe}.mp3`, { type: blob.type || 'audio/mpeg' })
 }
 

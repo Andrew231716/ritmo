@@ -1,4 +1,4 @@
-module.exports = async function handler(req, res) {
+export default async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Origin', req.headers.origin || '*')
   res.setHeader('Access-Control-Allow-Methods', 'POST,OPTIONS')
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type')
@@ -6,12 +6,14 @@ module.exports = async function handler(req, res) {
   if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' })
 
   try {
-    const { code, code_verifier, redirect_uri, client_id } = req.body || {}
+    const body =
+      typeof req.body === 'string' ? JSON.parse(req.body || '{}') : req.body || {}
+    const { code, code_verifier, redirect_uri, client_id } = body
     if (!code || !code_verifier || !redirect_uri || !client_id) {
       return res.status(400).json({ error: 'Parametri OAuth mancanti' })
     }
 
-    const body = new URLSearchParams({
+    const form = new URLSearchParams({
       grant_type: 'authorization_code',
       code: String(code),
       redirect_uri: String(redirect_uri),
@@ -22,7 +24,7 @@ module.exports = async function handler(req, res) {
     const upstream = await fetch('https://api.audio.com/auth/token', {
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body,
+      body: form,
     })
     const data = await upstream.json()
     if (!upstream.ok) {

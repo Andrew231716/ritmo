@@ -739,7 +739,7 @@ export default function App() {
     }
   }
 
-  async function useAudioComTrack(track: AudioComTrack) {
+  async function bringAudioComTrack(track: AudioComTrack) {
     setError(null)
     setAudioComBusy(true)
     try {
@@ -1227,7 +1227,7 @@ export default function App() {
                                 type="button"
                                 className="btn btn-primary"
                                 disabled={!ok || busy || audioComBusy}
-                                onClick={() => void useAudioComTrack(track)}
+                                onClick={() => void bringAudioComTrack(track)}
                               >
                                 {lang === 'it' ? 'Usa' : 'Use'}
                               </button>

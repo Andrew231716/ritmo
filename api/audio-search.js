@@ -1,4 +1,4 @@
-module.exports = async function handler(req, res) {
+export default async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Origin', req.headers.origin || '*')
   res.setHeader('Access-Control-Allow-Methods', 'POST,OPTIONS')
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type')
@@ -6,7 +6,9 @@ module.exports = async function handler(req, res) {
   if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' })
 
   try {
-    const { token, query = '', page = 1 } = req.body || {}
+    const body =
+      typeof req.body === 'string' ? JSON.parse(req.body || '{}') : req.body || {}
+    const { token, query = '', page = 1 } = body
     if (!token) return res.status(401).json({ error: 'Token mancante' })
 
     const params = new URLSearchParams({
@@ -21,7 +23,7 @@ module.exports = async function handler(req, res) {
         Accept: 'application/json',
       },
     })
-    const data = await upstream.json()
+    const data = await upstream.json().catch(() => ({}))
     if (!upstream.ok) {
       return res.status(upstream.status).json({
         error: data.message || data.error || 'Ricerca Audio.com fallita',

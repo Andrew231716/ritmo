@@ -23,7 +23,7 @@ function canImport({ downloadable, license }) {
   return lic.startsWith('cc-') || lic === 'cc-0'
 }
 
-module.exports = async function handler(req, res) {
+export default async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Origin', req.headers.origin || '*')
   res.setHeader('Access-Control-Allow-Methods', 'POST,OPTIONS')
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type')
@@ -31,7 +31,9 @@ module.exports = async function handler(req, res) {
   if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' })
 
   try {
-    const { url, downloadable = false, license = '', title = 'audio' } = req.body || {}
+    const body =
+      typeof req.body === 'string' ? JSON.parse(req.body || '{}') : req.body || {}
+    const { url, downloadable = false, license = '', title = 'audio' } = body
     if (!url || !hostAllowed(url)) {
       return res.status(400).json({ error: 'URL audio non valido' })
     }
@@ -59,11 +61,9 @@ module.exports = async function handler(req, res) {
     }
 
     const type = upstream.headers.get('content-type') || 'audio/mpeg'
+    const filename = `${String(title).replace(/[^\w-]+/g, '_').slice(0, 40)}.mp3`
     res.setHeader('Content-Type', type)
-    res.setHeader(
-      'Content-Disposition',
-      `attachment; filename="${String(title).replace(/[^\w\-]+/g, '_').slice(0, 40)}.mp3"`,
-    )
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`)
     return res.status(200).send(buf)
   } catch (err) {
     return res.status(500).json({ error: err instanceof Error ? err.message : 'Server error' })
