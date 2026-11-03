@@ -6,6 +6,7 @@ Comprimi, modifica e metti la musica sui video — tutto nel browser.
 
 - **Comprimi**: preset, FPS, risoluzione, CRF, stima tempo, annulla
 - **Musica**: sostituisci/mix, loop, fade, inizio traccia, «Usa in Musica»
+- **Audio.com**: login OAuth, cerca tracce pubbliche, importa solo se download abilitato o Creative Commons
 - **Modifica**: taglia, ruota, ritaglia, velocità
 - **Testo**: overlay testo sul video
 - **Converti**: GIF / MP3 / WAV

@@ -424,6 +424,13 @@
   margin-right: 0.45rem;
 }
 
+.audiocom-box {
+  padding: 0.85rem 0.95rem;
+  border-radius: 14px;
+  border: 1px solid var(--line);
+  background: color-mix(in srgb, var(--bg-deep) 40%, transparent);
+}
+
 .batch-list {
   display: grid;
   gap: 0.55rem;

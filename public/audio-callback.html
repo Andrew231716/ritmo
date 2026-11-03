@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="it">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Nastro · Audio.com</title>
+    <style>
+      body {
+        margin: 0;
+        min-height: 100vh;
+        display: grid;
+        place-items: center;
+        font-family: system-ui, sans-serif;
+        background: #061816;
+        color: #e8f2ef;
+      }
+      p {
+        opacity: 0.85;
+      }
+    </style>
+  </head>
+  <body>
+    <p id="msg">Connessione Audio.com…</p>
+    <script>
+      ;(function () {
+        var params = new URLSearchParams(location.search)
+        var code = params.get('code')
+        var err = params.get('error')
+        var msg = document.getElementById('msg')
+        if (err) {
+          msg.textContent = 'Accesso annullato o negato.'
+          setTimeout(function () {
+            location.replace('/')
+          }, 1200)
+          return
+        }
+        if (!code) {
+          msg.textContent = 'Codice mancante.'
+          setTimeout(function () {
+            location.replace('/')
+          }, 1200)
+          return
+        }
+        // Store code for the app to finish PKCE exchange
+        try {
+          sessionStorage.setItem('nastro-audiocom-code', code)
+        } catch (e) {}
+        location.replace('/?audiocom=1')
+      })()
+    </script>
+  </body>
+</html>

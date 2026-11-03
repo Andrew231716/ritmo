@@ -14,6 +14,17 @@ import {
   requestWakeLock,
   yieldUI,
 } from './lib/format'
+import {
+  beginAudioComLogin,
+  canImportTrack,
+  clearAudioComAuth,
+  finishAudioComLogin,
+  getStoredToken,
+  importAudioComTrack,
+  searchAudioCom,
+  trackPageUrl,
+  type AudioComTrack,
+} from './lib/audioCom'
 import { t, type Lang } from './lib/i18n'
 
 type AppTab =
@@ -135,6 +146,11 @@ export default function App() {
   const [voiceSource, setVoiceSource] = useState<File | null>(null)
   const [voicePreviewUrl, setVoicePreviewUrl] = useState<string | null>(null)
 
+  const [audioComAuthed, setAudioComAuthed] = useState(false)
+  const [audioComQuery, setAudioComQuery] = useState('')
+  const [audioComResults, setAudioComResults] = useState<AudioComTrack[]>([])
+  const [audioComBusy, setAudioComBusy] = useState(false)
+
   const [batch, setBatch] = useState<BatchItem[]>([])
   const [busy, setBusy] = useState(false)
   const [progress, setProgress] = useState(0)
@@ -198,6 +214,34 @@ export default function App() {
       if (voicePreviewUrl) URL.revokeObjectURL(voicePreviewUrl)
     }
   }, [voicePreviewUrl])
+
+  useEffect(() => {
+    setAudioComAuthed(Boolean(getStoredToken()))
+    const params = new URLSearchParams(window.location.search)
+    if (params.get('audiocom') === '1') {
+      const code = sessionStorage.getItem('nastro-audiocom-code')
+      sessionStorage.removeItem('nastro-audiocom-code')
+      window.history.replaceState({}, '', '/')
+      if (code) {
+        void (async () => {
+          try {
+            setStatus(lang === 'it' ? 'Collego Audio.com…' : 'Connecting Audio.com…')
+            await finishAudioComLogin(code)
+            setAudioComAuthed(true)
+            setTab('music')
+            setStatus(
+              lang === 'it'
+                ? 'Audio.com collegato. Cerca una traccia scaricabile.'
+                : 'Audio.com connected. Search a downloadable track.',
+            )
+          } catch (err) {
+            console.error(err)
+            setError(err instanceof Error ? err.message : 'Audio.com login failed')
+          }
+        })()
+      }
+    }
+  }, [lang])
 
   function setPreviewVideo(file: File | null) {
     if (videoUrlRef.current) {
@@ -672,6 +716,49 @@ export default function App() {
     })
   }
 
+  async function runAudioComSearch() {
+    setError(null)
+    setAudioComBusy(true)
+    try {
+      const results = await searchAudioCom(audioComQuery.trim())
+      setAudioComResults(results)
+      setStatus(
+        results.length
+          ? lang === 'it'
+            ? `${results.length} risultati Audio.com`
+            : `${results.length} Audio.com results`
+          : lang === 'it'
+            ? 'Nessun risultato'
+            : 'No results',
+      )
+    } catch (err) {
+      console.error(err)
+      setError(err instanceof Error ? err.message : 'Search failed')
+    } finally {
+      setAudioComBusy(false)
+    }
+  }
+
+  async function useAudioComTrack(track: AudioComTrack) {
+    setError(null)
+    setAudioComBusy(true)
+    try {
+      const file = await importAudioComTrack(track)
+      setAudio(file)
+      setTab('music')
+      setStatus(
+        lang === 'it'
+          ? `«${track.title}» pronta. Carica un video e premi Metti la musica.`
+          : `“${track.title}” ready. Load a video and add music.`,
+      )
+    } catch (err) {
+      console.error(err)
+      setError(err instanceof Error ? err.message : 'Import failed')
+    } finally {
+      setAudioComBusy(false)
+    }
+  }
+
   function separateVoice() {
     if (!voiceSource) return
     void withJob(async () => {
@@ -1039,6 +1126,120 @@ export default function App() {
 
           {tab === 'music' && (
             <>
+              <div className="audiocom-box">
+                <p className="drop-label">Audio.com</p>
+                <p className="drop-hint">
+                  {lang === 'it'
+                    ? 'Cerca tracce pubbliche. Import solo se download abilitato dall’autore o licenza Creative Commons.'
+                    : 'Search public tracks. Import only if download is enabled or Creative Commons.'}
+                </p>
+                <div className="actions" style={{ marginTop: '0.6rem' }}>
+                  {!audioComAuthed ? (
+                    <button
+                      type="button"
+                      className="btn btn-primary"
+                      disabled={busy || audioComBusy}
+                      onClick={() => void beginAudioComLogin()}
+                    >
+                      {lang === 'it' ? 'Accedi ad Audio.com' : 'Sign in to Audio.com'}
+                    </button>
+                  ) : (
+                    <>
+                      <button
+                        type="button"
+                        className="btn btn-ghost"
+                        disabled={busy || audioComBusy}
+                        onClick={() => {
+                          clearAudioComAuth()
+                          setAudioComAuthed(false)
+                          setAudioComResults([])
+                        }}
+                      >
+                        {lang === 'it' ? 'Esci Audio.com' : 'Sign out'}
+                      </button>
+                    </>
+                  )}
+                </div>
+                {audioComAuthed && (
+                  <>
+                    <div className="field-grid" style={{ marginTop: '0.75rem' }}>
+                      <div className="control-row">
+                        <label htmlFor="acq">
+                          {lang === 'it' ? 'Cerca canzone' : 'Search song'}
+                        </label>
+                        <input
+                          id="acq"
+                          type="text"
+                          value={audioComQuery}
+                          disabled={busy || audioComBusy}
+                          placeholder={lang === 'it' ? 'es. piano lofi' : 'e.g. piano lofi'}
+                          onChange={(e) => setAudioComQuery(e.target.value)}
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter') void runAudioComSearch()
+                          }}
+                        />
+                      </div>
+                      <div className="actions" style={{ alignItems: 'end' }}>
+                        <button
+                          type="button"
+                          className="btn btn-primary"
+                          disabled={busy || audioComBusy}
+                          onClick={() => void runAudioComSearch()}
+                        >
+                          {audioComBusy
+                            ? t(lang, 'busy')
+                            : lang === 'it'
+                              ? 'Cerca'
+                              : 'Search'}
+                        </button>
+                      </div>
+                    </div>
+                    <div className="batch-list" style={{ marginTop: '0.75rem' }}>
+                      {audioComResults.map((track) => {
+                        const ok = canImportTrack(track)
+                        return (
+                          <div key={track.id} className="batch-item">
+                            <span>
+                              <strong>{track.title}</strong>
+                              <br />
+                              <span className="drop-hint">
+                                {track.author_name || track.username || '—'} ·{' '}
+                                {track.license || 'license?'} ·{' '}
+                                {track.is_downloadable
+                                  ? lang === 'it'
+                                    ? 'download ok'
+                                    : 'downloadable'
+                                  : lang === 'it'
+                                    ? 'no download'
+                                    : 'no download'}
+                              </span>
+                            </span>
+                            <span className="actions">
+                              <a
+                                className="btn btn-ghost"
+                                href={trackPageUrl(track)}
+                                target="_blank"
+                                rel="noreferrer"
+                              >
+                                Audio.com
+                              </a>
+                              <button
+                                type="button"
+                                className="btn btn-primary"
+                                disabled={!ok || busy || audioComBusy}
+                                onClick={() => void useAudioComTrack(track)}
+                              >
+                                {lang === 'it' ? 'Usa' : 'Use'}
+                              </button>
+                            </span>
+                          </div>
+                        )
+                      })}
+                    </div>
+                  </>
+                )}
+              </div>
+
               <label className="toggle">
                 <input
                   type="checkbox"
