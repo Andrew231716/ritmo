@@ -483,8 +483,9 @@ export default function App() {
     })()
   }
 
-  function mixMusic() {
-    if (!video || !audio) return
+  function mixMusic(audioOverride?: File | null) {
+    const musicFile = audioOverride ?? audio
+    if (!video || !musicFile) return
     if (video.size > musicVideoLimitBytes()) {
       setError(
         lang === 'it'
@@ -495,13 +496,13 @@ export default function App() {
     }
     void withJob(async () => {
       const videoName = 'input_video' + extOf(video.name, '.mp4')
-      const audioName = 'input_audio' + extOf(audio.name, '.mp3')
+      const audioName = 'input_audio' + extOf(musicFile.name, '.mp3')
       const outName = 'output.mp4'
       const musicVol = Math.max(0.05, musicVolume / 100)
       const origVol = Math.max(0, originalVolume / 100)
       for (const n of [videoName, audioName, outName]) await engine.delete(n)
       setStatus(lang === 'it' ? 'Caricamento audio…' : 'Loading audio…')
-      await engine.write(audioName, audio)
+      await engine.write(audioName, musicFile)
       setStatus(lang === 'it' ? 'Caricamento video…' : 'Loading video…')
       await engine.write(videoName, video)
       setStatus(lang === 'it' ? 'Unione musica…' : 'Mixing music…')
@@ -811,18 +812,44 @@ export default function App() {
     setError(null)
     stopAudioComPreview()
     setAudioComBusy(true)
+    setStatus(
+      lang === 'it'
+        ? `Scarico «${track.title}»…`
+        : `Downloading “${track.title}”…`,
+    )
     try {
       const file = await importAudioComTrack(track)
       setAudio(file)
       setTab('music')
+      const canAutoMix =
+        Boolean(video) &&
+        ready &&
+        !busy &&
+        Boolean(video && video.size <= musicVideoLimitBytes())
+      if (canAutoMix && video) {
+        setStatus(
+          lang === 'it'
+            ? `«${track.title}» scaricata · inserisco nel video…`
+            : `“${track.title}” downloaded · adding to video…`,
+        )
+        setAudioComBusy(false)
+        // Pass the file directly — React state would not be updated yet.
+        mixMusic(file)
+        return
+      }
       setStatus(
         lang === 'it'
-          ? `«${track.title}» pronta. Carica un video e premi Metti la musica.`
-          : `“${track.title}” ready. Load a video and add music.`,
+          ? video
+            ? `«${track.title}» pronta (${formatBytes(file.size)}). Premi Metti la musica.`
+            : `«${track.title}» pronta (${formatBytes(file.size)}). Carica un video e premi Metti la musica.`
+          : video
+            ? `“${track.title}” ready (${formatBytes(file.size)}). Press Add music.`
+            : `“${track.title}” ready (${formatBytes(file.size)}). Load a video and add music.`,
       )
     } catch (err) {
       console.error(err)
       setError(err instanceof Error ? err.message : 'Import failed')
+      setStatus('')
     } finally {
       setAudioComBusy(false)
     }
@@ -1450,7 +1477,12 @@ export default function App() {
                 </div>
               </div>
               <div className="actions">
-                <button type="button" className="btn btn-primary" disabled={!canMix} onClick={mixMusic}>
+                <button
+                  type="button"
+                  className="btn btn-primary"
+                  disabled={!canMix}
+                  onClick={() => mixMusic()}
+                >
                   {busy ? t(lang, 'busy') : lang === 'it' ? 'Metti la musica' : 'Add music'}
                 </button>
                 {busy && (

@@ -1,4 +1,12 @@
 {
+  "functions": {
+    "api/audio-fetch.js": {
+      "maxDuration": 60
+    },
+    "api/audio-preview.js": {
+      "maxDuration": 30
+    }
+  },
   "headers": [
     {
       "source": "/(.*)",

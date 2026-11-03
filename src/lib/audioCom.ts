@@ -226,12 +226,44 @@ export function canImportTrack(track: AudioComTrack) {
   return lic.startsWith('cc-') || lic === 'cc-0'
 }
 
+function audioFileFromBlob(blob: Blob, title: string, sourceUrl: string) {
+  const safe = (title || 'audio-com').replace(/[^\w-]+/g, '_').slice(0, 40)
+  const ct = (blob.type || '').toLowerCase()
+  let ext = '.mp3'
+  let type = 'audio/mpeg'
+  if (ct.includes('mp4') || ct.includes('m4a') || ct.includes('aac') || /\.m4a(\?|$)/i.test(sourceUrl)) {
+    ext = '.m4a'
+    type = 'audio/mp4'
+  } else if (ct.includes('wav') || /\.wav(\?|$)/i.test(sourceUrl)) {
+    ext = '.wav'
+    type = 'audio/wav'
+  } else if (ct.includes('ogg') || /\.ogg(\?|$)/i.test(sourceUrl)) {
+    ext = '.ogg'
+    type = 'audio/ogg'
+  } else if (ct.startsWith('audio/')) {
+    type = blob.type
+  }
+  return new File([blob], `${safe}${ext}`, { type })
+}
+
 export async function importAudioComTrack(track: AudioComTrack) {
   if (!canImportTrack(track)) {
     throw new Error('Traccia non scaricabile / senza licenza libera')
   }
-  const url = track.play?.url
+  const url = track.play?.url?.trim()
   if (!url) throw new Error('URL audio non disponibile')
+
+  // Prefer direct CDN fetch when CORS allows (no serverless size limit).
+  try {
+    const direct = await fetch(url, { mode: 'cors', credentials: 'omit' })
+    if (direct.ok) {
+      const blob = await direct.blob()
+      if (blob.size >= 1000) return audioFileFromBlob(blob, track.title, url)
+    }
+  } catch {
+    /* CORS / network — fall through to same-origin proxy */
+  }
+
   const res = await fetch('/api/audio-fetch', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -247,8 +279,10 @@ export async function importAudioComTrack(track: AudioComTrack) {
     throw new Error(err.error || 'Download fallito')
   }
   const blob = await res.blob()
-  const safe = (track.title || 'audio-com').replace(/[^\w-]+/g, '_').slice(0, 40)
-  return new File([blob], `${safe}.mp3`, { type: blob.type || 'audio/mpeg' })
+  if (blob.size < 1000) {
+    throw new Error('File audio scaricato vuoto o troppo piccolo')
+  }
+  return audioFileFromBlob(blob, track.title, url)
 }
 
 export function trackPageUrl(track: AudioComTrack) {
