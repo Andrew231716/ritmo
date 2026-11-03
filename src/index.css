@@ -1,4 +1,5 @@
-:root {
+:root,
+[data-theme='dark'] {
   --bg-deep: #061816;
   --bg-mid: #0b2e2a;
   --bg-lift: #123f39;
@@ -12,12 +13,34 @@
   --radius: 18px;
   --font-display: 'Bricolage Grotesque', Georgia, serif;
   --font-body: 'Figtree', system-ui, sans-serif;
+  --page-bg:
+    radial-gradient(ellipse 90% 60% at 10% -10%, rgba(240, 180, 41, 0.18), transparent 55%),
+    radial-gradient(ellipse 70% 50% at 95% 15%, rgba(45, 140, 120, 0.35), transparent 50%),
+    radial-gradient(ellipse 60% 40% at 50% 100%, rgba(224, 122, 95, 0.12), transparent 55%),
+    linear-gradient(165deg, #082421 0%, var(--bg-deep) 45%, #041210 100%);
   color: var(--foam);
   background: var(--bg-deep);
   font-family: var(--font-body);
   font-synthesis: none;
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
+}
+
+[data-theme='light'] {
+  --bg-deep: #f3f7f5;
+  --bg-mid: #e4efeb;
+  --bg-lift: #d5e6e0;
+  --foam: #12332e;
+  --foam-dim: #4d6b64;
+  --amber: #c78910;
+  --amber-hot: #a8740a;
+  --coral: #c45d45;
+  --line: rgba(18, 51, 46, 0.12);
+  --shadow: 0 18px 40px rgba(18, 51, 46, 0.12);
+  --page-bg:
+    radial-gradient(ellipse 90% 60% at 10% -10%, rgba(240, 180, 41, 0.2), transparent 55%),
+    radial-gradient(ellipse 70% 50% at 95% 15%, rgba(45, 140, 120, 0.18), transparent 50%),
+    linear-gradient(165deg, #f7faf8 0%, #eef5f2 45%, #e7f0ec 100%);
 }
 
 *,
@@ -35,11 +58,7 @@ body,
 body {
   margin: 0;
   min-width: 320px;
-  background:
-    radial-gradient(ellipse 90% 60% at 10% -10%, rgba(240, 180, 41, 0.18), transparent 55%),
-    radial-gradient(ellipse 70% 50% at 95% 15%, rgba(45, 140, 120, 0.35), transparent 50%),
-    radial-gradient(ellipse 60% 40% at 50% 100%, rgba(224, 122, 95, 0.12), transparent 55%),
-    linear-gradient(165deg, #082421 0%, var(--bg-deep) 45%, #041210 100%);
+  background: var(--page-bg);
   background-attachment: fixed;
 }
 
@@ -48,7 +67,7 @@ body::before {
   position: fixed;
   inset: 0;
   pointer-events: none;
-  opacity: 0.045;
+  opacity: 0.04;
   background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
   z-index: 0;
 }
@@ -60,7 +79,8 @@ body::before {
 
 button,
 input,
-select {
+select,
+textarea {
   font: inherit;
 }
 

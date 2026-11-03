@@ -1,12 +1,18 @@
 # Nastro
 
-Comprimi video mantenendo una buona qualità e aggiungi la tua musica — tutto nel browser.
+Comprimi, modifica e metti la musica sui video — tutto nel browser.
 
 ## Funzioni
 
-- **Comprimi**: qualità, FPS, risoluzione
-- **Musica**: sostituisci o mixa l’audio del video
-- Elaborazione locale con FFmpeg.wasm (nessun upload su server)
+- **Comprimi**: preset, FPS, risoluzione, CRF, stima tempo, annulla
+- **Musica**: sostituisci/mix, loop, fade, inizio traccia, «Usa in Musica»
+- **Modifica**: taglia, ruota, ritaglia, velocità
+- **Testo**: overlay testo sul video
+- **Converti**: GIF / MP3 / WAV
+- **Coda**: compressione multipla
+- **Impostazioni**: tema chiaro/scuro, IT/EN
+
+Elaborazione locale con FFmpeg.wasm (nessun upload su server).
 
 ## Sviluppo
 

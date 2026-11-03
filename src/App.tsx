@@ -1,14 +1,38 @@
-import { FFmpeg } from '@ffmpeg/ffmpeg'
-import { fetchFile, toBlobURL } from '@ffmpeg/util'
-import { useEffect, useRef, useState, type DragEvent } from 'react'
+import { useEffect, useMemo, useRef, useState, type DragEvent } from 'react'
 import './App.css'
+import { engine } from './lib/ffmpegEngine'
+import {
+  estimateCompressSeconds,
+  extOf,
+  formatBytes,
+  formatDuration,
+  isAudioFile,
+  isMobileDevice,
+  isVideoFile,
+  musicVideoLimitBytes,
+  readVideoDuration,
+  requestWakeLock,
+  yieldUI,
+} from './lib/format'
+import { t, type Lang } from './lib/i18n'
 
-type AppTab = 'compress' | 'music'
+type AppTab = 'compress' | 'music' | 'edit' | 'text' | 'convert' | 'batch' | 'settings'
 type MixMode = 'replace' | 'mix'
 type QualityPreset = 'high' | 'balanced' | 'small'
-
 type FpsOption = 'original' | '60' | '30' | '24' | '15'
 type ResOption = 'original' | '1080' | '720' | '480'
+type Theme = 'dark' | 'light'
+type Rotate = '0' | '90' | '180' | '270'
+type Speed = '0.5' | '0.75' | '1' | '1.25' | '1.5' | '2'
+type ConvertKind = 'gif' | 'mp3' | 'wav'
+
+type BatchItem = {
+  id: string
+  file: File
+  status: 'queued' | 'running' | 'done' | 'error'
+  resultUrl?: string
+  error?: string
+}
 
 const PRESETS: Record<
   QualityPreset,
@@ -16,103 +40,32 @@ const PRESETS: Record<
 > = {
   high: {
     label: 'Alta',
-    hint: 'Ottima qualità, file più grande',
+    hint: 'Ottima qualità',
     crf: 18,
     preset: 'medium',
     mobilePreset: 'veryfast',
   },
   balanced: {
     label: 'Bilanciata',
-    hint: 'Buona qualità, peso ragionevole',
+    hint: 'Buon compromesso',
     crf: 23,
     preset: 'veryfast',
     mobilePreset: 'ultrafast',
   },
   small: {
     label: 'Compatta',
-    hint: 'File più leggero, qualità ok',
+    hint: 'File leggero',
     crf: 28,
     preset: 'ultrafast',
     mobilePreset: 'ultrafast',
   },
 }
 
-function formatBytes(bytes: number) {
-  if (bytes < 1024) return `${bytes} B`
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
-}
-
-function isVideoFile(file: File) {
-  if (file.type.startsWith('video/')) return true
-  return /\.(mp4|webm|mov|m4v|mkv|avi|3gp)$/i.test(file.name)
-}
-
-function isAudioFile(file: File) {
-  if (file.type.startsWith('audio/')) return true
-  return /\.(mp3|wav|m4a|aac|ogg|flac|wma|opus)$/i.test(file.name)
-}
-
-function extOf(name: string, fallback: string) {
-  const i = name.lastIndexOf('.')
-  if (i < 0) return fallback
-  const ext = name.slice(i).toLowerCase()
-  if (ext.length > 8) return fallback
-  return ext
-}
-
-function toU8(data: string | Uint8Array): Uint8Array {
-  if (typeof data === 'string') return new TextEncoder().encode(data)
-  return data instanceof Uint8Array ? data : new Uint8Array(data)
-}
-
-function isMobileDevice() {
-  if (typeof navigator === 'undefined') return false
-  return /iPhone|iPad|iPod|Android/i.test(navigator.userAgent)
-}
-
-function yieldUI() {
-  return new Promise<void>((resolve) => {
-    setTimeout(resolve, 40)
-  })
-}
-
-/** Soft limit: phones kill the PWA when FFmpeg holds huge videos in RAM. */
-function musicVideoLimitBytes() {
-  return isMobileDevice() ? 45 * 1024 * 1024 : 180 * 1024 * 1024
-}
-
-function blobFromU8(bytes: Uint8Array, type: string) {
-  const view = new Uint8Array(bytes.byteLength)
-  view.set(bytes)
-  return new Blob([view], { type })
-}
-
-async function requestWakeLock() {
-  try {
-    const nav = navigator as Navigator & {
-      wakeLock?: { request: (type: 'screen') => Promise<{ release: () => Promise<void> }> }
-    }
-    if (!nav.wakeLock) return null
-    return await nav.wakeLock.request('screen')
-  } catch {
-    return null
-  }
-}
-
 function BrandMark() {
   return (
     <div className="brand-mark" aria-hidden>
       <svg viewBox="0 0 24 24" fill="none">
-        <rect
-          x="3"
-          y="5"
-          width="18"
-          height="14"
-          rx="2.5"
-          stroke="#E8F2EF"
-          strokeWidth="1.8"
-        />
+        <rect x="3" y="5" width="18" height="14" rx="2.5" stroke="#E8F2EF" strokeWidth="1.8" />
         <path d="M3 8.5h18M3 15.5h18" stroke="#E8F2EF" strokeWidth="1.4" opacity="0.35" />
         <rect x="5.5" y="10" width="2.4" height="4" rx="0.5" fill="#F0B429" />
         <rect x="9.2" y="10" width="2.4" height="4" rx="0.5" fill="#F0B429" opacity="0.75" />
@@ -124,24 +77,34 @@ function BrandMark() {
 }
 
 export default function App() {
-  const ffmpegRef = useRef<FFmpeg | null>(null)
-  const logsRef = useRef<string[]>([])
   const videoUrlRef = useRef<string | null>(null)
   const resultUrlRef = useRef<string | null>(null)
   const [ready, setReady] = useState(false)
   const [loadingEngine, setLoadingEngine] = useState(true)
   const [tab, setTab] = useState<AppTab>('compress')
+  const [lang, setLang] = useState<Lang>(() =>
+    (localStorage.getItem('nastro-lang') as Lang) || 'it',
+  )
+  const [theme, setTheme] = useState<Theme>(() =>
+    (localStorage.getItem('nastro-theme') as Theme) || 'dark',
+  )
 
   const [video, setVideo] = useState<File | null>(null)
   const [audio, setAudio] = useState<File | null>(null)
   const [videoUrl, setVideoUrl] = useState<string | null>(null)
+  const [videoDuration, setVideoDuration] = useState(0)
   const [resultUrl, setResultUrl] = useState<string | null>(null)
   const [resultSize, setResultSize] = useState<number | null>(null)
-  const [resultKind, setResultKind] = useState<'compress' | 'music' | null>(null)
+  const [resultKind, setResultKind] = useState<string | null>(null)
+  const [resultName, setResultName] = useState('nastro.mp4')
 
   const [musicVolume, setMusicVolume] = useState(80)
   const [originalVolume, setOriginalVolume] = useState(30)
   const [mixMode, setMixMode] = useState<MixMode>('replace')
+  const [loopMusic, setLoopMusic] = useState(true)
+  const [musicStart, setMusicStart] = useState(0)
+  const [fadeIn, setFadeIn] = useState(0.5)
+  const [fadeOut, setFadeOut] = useState(0.8)
 
   const [quality, setQuality] = useState<QualityPreset>('balanced')
   const [fps, setFps] = useState<FpsOption>('original')
@@ -150,44 +113,52 @@ export default function App() {
   )
   const [crfOverride, setCrfOverride] = useState<number | null>(null)
 
+  const [trimStart, setTrimStart] = useState(0)
+  const [trimEnd, setTrimEnd] = useState(0)
+  const [rotate, setRotate] = useState<Rotate>('0')
+  const [speed, setSpeed] = useState<Speed>('1')
+  const [cropCenter, setCropCenter] = useState(false)
+
+  const [overlayText, setOverlayText] = useState('')
+  const [overlaySize, setOverlaySize] = useState(36)
+  const [convertKind, setConvertKind] = useState<ConvertKind>('gif')
+
+  const [batch, setBatch] = useState<BatchItem[]>([])
   const [busy, setBusy] = useState(false)
   const [progress, setProgress] = useState(0)
   const [status, setStatus] = useState('Caricamento motore video…')
   const [error, setError] = useState<string | null>(null)
   const [dragOver, setDragOver] = useState<'video' | 'audio' | null>(null)
 
-  const effectiveCrf = crfOverride ?? PRESETS[quality].crf
   const mobile = isMobileDevice()
+  const effectiveCrf = crfOverride ?? PRESETS[quality].crf
+  const eta = useMemo(
+    () => (video ? estimateCompressSeconds(video.size, mobile) : 0),
+    [video, mobile],
+  )
+
+  useEffect(() => {
+    document.documentElement.setAttribute('data-theme', theme)
+    localStorage.setItem('nastro-theme', theme)
+  }, [theme])
+
+  useEffect(() => {
+    localStorage.setItem('nastro-lang', lang)
+  }, [lang])
 
   useEffect(() => {
     let cancelled = false
-
     async function load() {
       try {
-        const ffmpeg = new FFmpeg()
-        ffmpegRef.current = ffmpeg
-        logsRef.current = []
-
-        ffmpeg.on('log', ({ message }) => {
-          logsRef.current.push(message)
-          if (logsRef.current.length > 80) logsRef.current.shift()
+        await engine.ensureLoaded({
+          onProgress: (p) => {
+            if (!cancelled) setProgress(p)
+          },
         })
-        ffmpeg.on('progress', ({ progress: p }) => {
-          if (!cancelled && Number.isFinite(p)) {
-            setProgress(Math.min(99, Math.max(0, Math.round(p * 100))))
-          }
-        })
-
-        const baseURL = 'https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.10/dist/esm'
-        await ffmpeg.load({
-          coreURL: await toBlobURL(`${baseURL}/ffmpeg-core.js`, 'text/javascript'),
-          wasmURL: await toBlobURL(`${baseURL}/ffmpeg-core.wasm`, 'application/wasm'),
-        })
-
         if (!cancelled) {
           setReady(true)
           setLoadingEngine(false)
-          setStatus('Pronto. Scegli cosa fare e carica un video.')
+          setStatus(lang === 'it' ? 'Pronto.' : 'Ready.')
         }
       } catch (err) {
         console.error(err)
@@ -195,20 +166,20 @@ export default function App() {
           setLoadingEngine(false)
           setReady(false)
           setError(
-            'Motore video non disponibile. Apri in Chrome o Edge (su iPhone Safari a volte non funziona). Ricarica la pagina.',
+            lang === 'it'
+              ? 'Motore non disponibile. Usa Chrome/Edge e ricarica.'
+              : 'Engine unavailable. Use Chrome/Edge and reload.',
           )
-          setStatus('')
         }
       }
     }
-
     void load()
     return () => {
       cancelled = true
       if (videoUrlRef.current) URL.revokeObjectURL(videoUrlRef.current)
       if (resultUrlRef.current) URL.revokeObjectURL(resultUrlRef.current)
     }
-  }, [])
+  }, [lang])
 
   function setPreviewVideo(file: File | null) {
     if (videoUrlRef.current) {
@@ -217,11 +188,16 @@ export default function App() {
     }
     if (!file) {
       setVideoUrl(null)
+      setVideoDuration(0)
       return
     }
     const url = URL.createObjectURL(file)
     videoUrlRef.current = url
     setVideoUrl(url)
+    void readVideoDuration(file).then((d) => {
+      setVideoDuration(d)
+      setTrimEnd(d > 0 ? Number(d.toFixed(1)) : 0)
+    })
   }
 
   function clearResult() {
@@ -235,42 +211,43 @@ export default function App() {
     setProgress(0)
   }
 
+  function publishResult(blob: Blob, name: string, kind: string) {
+    const url = URL.createObjectURL(blob)
+    if (resultUrlRef.current) URL.revokeObjectURL(resultUrlRef.current)
+    resultUrlRef.current = url
+    setResultUrl(url)
+    setResultSize(blob.size)
+    setResultKind(kind)
+    setResultName(name)
+    setProgress(100)
+  }
+
   function switchTab(next: AppTab) {
     if (busy) return
     setTab(next)
     setError(null)
-    // Keep files; only clear stale preview result when leaving its tab
-    if (resultKind && resultKind !== next) clearResult()
   }
 
   function pickFile(kind: 'video' | 'audio', file: File | undefined | null) {
     if (!file || busy) return
     setError(null)
     clearResult()
-
     if (kind === 'video') {
       if (!isVideoFile(file)) {
-        setError('Seleziona un file video (mp4, webm, mov…).')
+        setError(lang === 'it' ? 'Seleziona un video.' : 'Select a video.')
         return
       }
       setVideo(file)
       setPreviewVideo(file)
-      if (file.size > 80 * 1024 * 1024) {
-        setStatus(
-          `Video da ${formatBytes(file.size)}: l’elaborazione può richiedere diversi minuti.`,
-        )
-      } else {
-        setStatus('Video caricato.')
-      }
+      setStatus(`${file.name} · ${formatBytes(file.size)}`)
       return
     }
-
     if (!isAudioFile(file)) {
-      setError('Seleziona un file audio (mp3, wav, m4a…). Non da Spotify.')
+      setError(lang === 'it' ? 'Seleziona un audio.' : 'Select an audio file.')
       return
     }
     setAudio(file)
-    setStatus('Musica caricata.')
+    setStatus(`${file.name} · ${formatBytes(file.size)}`)
   }
 
   function onDrop(kind: 'video' | 'audio', e: DragEvent) {
@@ -279,138 +256,43 @@ export default function App() {
     pickFile(kind, e.dataTransfer.files?.[0])
   }
 
-  async function runFfmpeg(args: string[]) {
-    const ffmpeg = ffmpegRef.current
-    if (!ffmpeg) throw new Error('Motore non pronto')
-    logsRef.current = []
-    const code = await ffmpeg.exec(args)
-    if (code !== 0) {
-      const tail = logsRef.current.slice(-12).join('\n')
-      throw new Error(tail || `FFmpeg exit ${code}`)
-    }
+  function cancelJob() {
+    engine.requestCancel()
+    setBusy(false)
+    setStatus(lang === 'it' ? 'Annullato.' : 'Cancelled.')
+    setError(null)
   }
 
-  async function finishOutput(
-    outName: string,
-    downloadName: string,
-    kind: 'compress' | 'music',
-    purgeInputs: string[] = [],
-  ) {
-    const ffmpeg = ffmpegRef.current!
-    for (const name of purgeInputs) {
-      try {
-        await ffmpeg.deleteFile(name)
-      } catch {
-        /* ok */
-      }
-    }
-    await yieldUI()
-
-    const data = await ffmpeg.readFile(outName)
-    const bytes = toU8(data)
-    const blob = blobFromU8(bytes, 'video/mp4')
-    if (blob.size < 1000) throw new Error('Output vuoto o troppo piccolo')
-
-    try {
-      await ffmpeg.deleteFile(outName)
-    } catch {
-      /* ok */
-    }
-
-    const url = URL.createObjectURL(blob)
-    if (resultUrlRef.current) URL.revokeObjectURL(resultUrlRef.current)
-    resultUrlRef.current = url
-    setResultUrl(url)
-    setResultSize(blob.size)
-    setResultKind(kind)
-    setProgress(100)
-    setStatus(`Fatto! Scarica «${downloadName}».`)
-    return blob
-  }
-
-  async function compress() {
-    if (!video || !ffmpegRef.current || !ready || busy) return
-
+  async function withJob(fn: () => Promise<void>) {
+    if (!ready || busy) return
     setBusy(true)
     setError(null)
     setProgress(1)
-    setStatus('Preparazione compressione…')
     const wake = await requestWakeLock()
-
-    const ffmpeg = ffmpegRef.current
-    const videoName = 'input_video' + extOf(video.name, '.mp4')
-    const outName = 'compressed.mp4'
-    const presetCfg = PRESETS[quality]
-    const preset = mobile ? presetCfg.mobilePreset : presetCfg.preset
-    const crf = effectiveCrf
-
     try {
-      for (const name of [videoName, outName]) {
-        try {
-          await ffmpeg.deleteFile(name)
-        } catch {
-          /* ok */
-        }
-      }
-
-      setStatus('Caricamento video…')
-      await yieldUI()
-      await ffmpeg.writeFile(videoName, await fetchFile(video))
-      setStatus(
-        mobile
-          ? 'Compressione in corso… tieni lo schermo acceso'
-          : 'Compressione in corso… non chiudere la pagina',
-      )
-
-      const filters: string[] = []
-      if (resolution !== 'original') {
-        // even width/height avoids encoder failures on odd sizes
-        filters.push(`scale=-2:'min(${resolution},ih)':flags=fast_bilinear`)
-      }
-      if (fps !== 'original') {
-        filters.push(`fps=${fps}`)
-      }
-
-      const args = ['-i', videoName]
-      if (filters.length) {
-        args.push('-vf', filters.join(','))
-      }
-      args.push(
-        '-c:v',
-        'libx264',
-        '-preset',
-        preset,
-        '-crf',
-        String(crf),
-        '-pix_fmt',
-        'yuv420p',
-        '-c:a',
-        'aac',
-        '-b:a',
-        quality === 'high' ? '192k' : quality === 'balanced' ? '128k' : '96k',
-        '-movflags',
-        '+faststart',
-        outName,
-      )
-
-      await runFfmpeg(args)
-      const blob = await finishOutput(outName, 'nastro-compresso.mp4', 'compress', [videoName])
-      if (video.size > 0 && blob.size < video.size) {
-        const saved = Math.round((1 - blob.size / video.size) * 100)
-        setStatus(`Fatto! Circa ${saved}% più leggero. Scarica o usa in Musica.`)
-      }
+      // Reload engine if previously terminated by cancel
+      await engine.ensureLoaded({
+        onProgress: (p) => setProgress(p),
+      })
+      await fn()
     } catch (err) {
       console.error(err)
-      setError('Compressione fallita. Prova Compatta + 720p, oppure Chrome/Edge.')
-      setStatus('')
-    } finally {
-      for (const name of [videoName, outName]) {
-        try {
-          await ffmpeg.deleteFile(name)
-        } catch {
-          /* ignore */
-        }
+      const msg = err instanceof Error ? err.message : String(err)
+      if (msg.includes('cancelled') || engine.wasCancelled()) {
+        setStatus(lang === 'it' ? 'Annullato.' : 'Cancelled.')
+      } else {
+        setError(
+          mobile
+            ? lang === 'it'
+              ? 'Operazione fallita (memoria?). Prova Compatta + 720p.'
+              : 'Failed (memory?). Try Compact + 720p.'
+            : lang === 'it'
+              ? 'Operazione fallita. Prova file più leggeri.'
+              : 'Failed. Try smaller files.',
+        )
+        setStatus('')
       }
+    } finally {
       try {
         await wake?.release()
       } catch {
@@ -420,113 +302,161 @@ export default function App() {
     }
   }
 
+  async function compressOne(file: File) {
+    const videoName = 'input_video' + extOf(file.name, '.mp4')
+    const outName = 'compressed.mp4'
+    const presetCfg = PRESETS[quality]
+    const preset = mobile ? presetCfg.mobilePreset : presetCfg.preset
+    await engine.delete(videoName)
+    await engine.delete(outName)
+    setStatus(lang === 'it' ? 'Caricamento…' : 'Loading…')
+    await yieldUI()
+    await engine.write(videoName, file)
+    setStatus(
+      lang === 'it'
+        ? `Compressione… stima ~${formatDuration(eta || estimateCompressSeconds(file.size, mobile))}`
+        : `Compressing… ETA ~${formatDuration(eta || estimateCompressSeconds(file.size, mobile))}`,
+    )
+    const filters: string[] = []
+    if (resolution !== 'original') {
+      filters.push(`scale=-2:'min(${resolution},ih)':flags=fast_bilinear`)
+    }
+    if (fps !== 'original') filters.push(`fps=${fps}`)
+    const args = ['-i', videoName]
+    if (filters.length) args.push('-vf', filters.join(','))
+    args.push(
+      '-c:v',
+      'libx264',
+      '-preset',
+      preset,
+      '-crf',
+      String(effectiveCrf),
+      '-pix_fmt',
+      'yuv420p',
+      '-c:a',
+      'aac',
+      '-b:a',
+      quality === 'high' ? '192k' : quality === 'balanced' ? '128k' : '96k',
+      '-movflags',
+      '+faststart',
+      outName,
+    )
+    await engine.exec(args)
+    return engine.readBlob(outName, 'video/mp4', [videoName])
+  }
+
+  function compress() {
+    if (!video) return
+    void withJob(async () => {
+      const blob = await compressOne(video)
+      publishResult(blob, 'nastro-compresso.mp4', 'compress')
+      const saved =
+        video.size > 0 && blob.size < video.size
+          ? Math.round((1 - blob.size / video.size) * 100)
+          : 0
+      setStatus(
+        saved > 0
+          ? lang === 'it'
+            ? `Fatto! Circa ${saved}% più leggero.`
+            : `Done! About ${saved}% smaller.`
+          : lang === 'it'
+            ? 'Fatto!'
+            : 'Done!',
+      )
+    })
+  }
+
   function useCompressedForMusic() {
     if (!resultUrl || resultKind !== 'compress') return
     void (async () => {
-      try {
-        const res = await fetch(resultUrl)
-        const blob = await res.blob()
-        const compressed = new File([blob], 'nastro-compresso.mp4', { type: 'video/mp4' })
-        setVideo(compressed)
-        setPreviewVideo(compressed)
-        clearResult()
-        setTab('music')
-        setError(null)
-        setStatus(
-          compressed.size <= musicVideoLimitBytes()
-            ? 'Video compresso pronto per la musica. Carica un MP3.'
-            : `Ancora pesante (${formatBytes(compressed.size)}): riprova Compatta + 480p.`,
-        )
-      } catch (err) {
-        console.error(err)
-        setError('Non riesco a passare il video a Musica. Scarica e ricaricalo nel tab Musica.')
-      }
+      const blob = await (await fetch(resultUrl)).blob()
+      const file = new File([blob], 'nastro-compresso.mp4', { type: 'video/mp4' })
+      setVideo(file)
+      setPreviewVideo(file)
+      clearResult()
+      setTab('music')
+      setStatus(
+        file.size <= musicVideoLimitBytes()
+          ? lang === 'it'
+            ? 'Video pronto per la musica. Carica un MP3.'
+            : 'Video ready for music. Add an MP3.'
+          : lang === 'it'
+            ? 'Ancora pesante: riprova Compatta + 480p.'
+            : 'Still heavy: try Compact + 480p.',
+      )
     })()
   }
 
-  async function mixMusic() {
-    if (!video || !audio || !ffmpegRef.current || !ready || busy) return
-
-    const limit = musicVideoLimitBytes()
-    if (video.size > limit) {
+  function mixMusic() {
+    if (!video || !audio) return
+    if (video.size > musicVideoLimitBytes()) {
       setError(
-        mobile
-          ? `Video troppo pesante per la musica sul telefono (${formatBytes(video.size)}). Comprimi a 720p / Compatta, poi usa «Usa in Musica».`
-          : `Video troppo pesante (${formatBytes(video.size)}). Comprimilo prima, poi riprova.`,
+        lang === 'it'
+          ? `Video troppo pesante (${formatBytes(video.size)}). Comprimi prima.`
+          : `Video too large (${formatBytes(video.size)}). Compress first.`,
       )
-      setStatus('')
       return
     }
+    void withJob(async () => {
+      const videoName = 'input_video' + extOf(video.name, '.mp4')
+      const audioName = 'input_audio' + extOf(audio.name, '.mp3')
+      const outName = 'output.mp4'
+      const musicVol = Math.max(0.05, musicVolume / 100)
+      const origVol = Math.max(0, originalVolume / 100)
+      for (const n of [videoName, audioName, outName]) await engine.delete(n)
+      setStatus(lang === 'it' ? 'Caricamento audio…' : 'Loading audio…')
+      await engine.write(audioName, audio)
+      setStatus(lang === 'it' ? 'Caricamento video…' : 'Loading video…')
+      await engine.write(videoName, video)
+      setStatus(lang === 'it' ? 'Unione musica…' : 'Mixing music…')
 
-    setBusy(true)
-    setError(null)
-    setProgress(1)
-    setStatus('Preparazione file…')
-    await yieldUI()
-    const wake = await requestWakeLock()
-
-    const ffmpeg = ffmpegRef.current
-    const videoName = 'input_video' + extOf(video.name, '.mp4')
-    const audioName = 'input_audio' + extOf(audio.name, '.mp3')
-    const outName = 'output.mp4'
-    const musicVol = Math.max(0.05, musicVolume / 100)
-    const origVol = Math.max(0, originalVolume / 100)
-    const cleanupNames = [videoName, audioName, outName]
-
-    try {
-      for (const name of cleanupNames) {
-        try {
-          await ffmpeg.deleteFile(name)
-        } catch {
-          /* ok */
-        }
-      }
-
-      setStatus('Caricamento audio…')
-      await yieldUI()
-      await ffmpeg.writeFile(audioName, await fetchFile(audio))
-
-      setStatus('Caricamento video…')
-      await yieldUI()
-      await ffmpeg.writeFile(videoName, await fetchFile(video))
-
-      setStatus('Unione leggera (senza ricodificare il video)…')
-      await yieldUI()
-
-      const replaceArgs = [
-        '-i',
-        videoName,
-        '-i',
-        audioName,
-        '-filter_complex',
-        `[1:a]volume=${musicVol}[a]`,
-        '-map',
-        '0:v:0',
-        '-map',
-        '[a]',
-        '-c:v',
-        'copy',
-        '-c:a',
-        'aac',
-        '-b:a',
-        '160k',
-        '-movflags',
-        '+faststart',
-        '-shortest',
-        outName,
+      const fadeParts = [
+        fadeIn > 0 ? `afade=t=in:st=0:d=${fadeIn}` : '',
+        fadeOut > 0 && videoDuration > 0
+          ? `afade=t=out:st=${Math.max(0, videoDuration - fadeOut)}:d=${fadeOut}`
+          : '',
+      ].filter(Boolean)
+      const musicChain = [
+        musicStart > 0 ? `atrim=start=${musicStart},asetpts=PTS-STARTPTS` : '',
+        `volume=${musicVol}`,
+        ...fadeParts,
+        loopMusic ? 'aloop=loop=-1:size=2e+09' : '',
       ]
+        .filter(Boolean)
+        .join(',')
 
       if (mixMode === 'replace') {
-        await runFfmpeg(replaceArgs)
+        await engine.exec([
+          '-i',
+          videoName,
+          '-i',
+          audioName,
+          '-filter_complex',
+          `[1:a]${musicChain}[a]`,
+          '-map',
+          '0:v:0',
+          '-map',
+          '[a]',
+          '-c:v',
+          'copy',
+          '-c:a',
+          'aac',
+          '-b:a',
+          '160k',
+          '-movflags',
+          '+faststart',
+          '-shortest',
+          outName,
+        ])
       } else {
         try {
-          await runFfmpeg([
+          await engine.exec([
             '-i',
             videoName,
             '-i',
             audioName,
             '-filter_complex',
-            `[0:a]volume=${origVol}[a0];[1:a]volume=${musicVol}[a1];[a0][a1]amix=inputs=2:duration=first:dropout_transition=2[a]`,
+            `[0:a]volume=${origVol}[a0];[1:a]${musicChain}[a1];[a0][a1]amix=inputs=2:duration=first:dropout_transition=2[a]`,
             '-map',
             '0:v:0',
             '-map',
@@ -543,59 +473,222 @@ export default function App() {
             outName,
           ])
         } catch {
-          setStatus('Mix non riuscito: uso solo la musica…')
-          await yieldUI()
-          await runFfmpeg(replaceArgs)
+          await engine.exec([
+            '-i',
+            videoName,
+            '-i',
+            audioName,
+            '-filter_complex',
+            `[1:a]${musicChain}[a]`,
+            '-map',
+            '0:v:0',
+            '-map',
+            '[a]',
+            '-c:v',
+            'copy',
+            '-c:a',
+            'aac',
+            '-shortest',
+            outName,
+          ])
         }
       }
-
-      await finishOutput(outName, 'nastro-musica.mp4', 'music', [videoName, audioName])
-      setStatus('Fatto! Guarda l’anteprima e scarica l’MP4.')
-    } catch (err) {
-      console.error(err)
-      setError(
-        mobile
-          ? 'Il telefono ha esaurito la memoria. Comprimi prima il video (720p), poi riprova Musica.'
-          : 'Elaborazione fallita. Prova MP4 + MP3 più leggeri.',
-      )
-      setStatus('')
-    } finally {
-      for (const name of cleanupNames) {
-        try {
-          await ffmpeg.deleteFile(name)
-        } catch {
-          /* ignore */
-        }
-      }
-      try {
-        await wake?.release()
-      } catch {
-        /* ignore */
-      }
-      setBusy(false)
-    }
+      const blob = await engine.readBlob(outName, 'video/mp4', [videoName, audioName])
+      publishResult(blob, 'nastro-musica.mp4', 'music')
+      setStatus(lang === 'it' ? 'Fatto!' : 'Done!')
+    })
   }
 
-  const canCompress = Boolean(video && ready && !busy)
+  function editVideo() {
+    if (!video) return
+    void withJob(async () => {
+      const videoName = 'input_video' + extOf(video.name, '.mp4')
+      const outName = 'edited.mp4'
+      await engine.delete(videoName)
+      await engine.delete(outName)
+      await engine.write(videoName, video)
+      setStatus(lang === 'it' ? 'Modifica in corso…' : 'Editing…')
+
+      const filters: string[] = []
+      if (rotate === '90') filters.push('transpose=1')
+      if (rotate === '180') filters.push('transpose=1,transpose=1')
+      if (rotate === '270') filters.push('transpose=2')
+      if (cropCenter) filters.push('crop=iw*0.85:ih*0.85')
+      if (speed !== '1') {
+        const s = Number(speed)
+        filters.push(`setpts=${(1 / s).toFixed(4)}*PTS`)
+      }
+
+      const args = ['-i', videoName]
+      if (trimStart > 0) args.push('-ss', String(trimStart))
+      if (trimEnd > trimStart) args.push('-to', String(trimEnd))
+      if (filters.length) args.push('-vf', filters.join(','))
+      if (speed !== '1') {
+        args.push('-af', `atempo=${Math.min(2, Math.max(0.5, Number(speed)))}`)
+      }
+      args.push(
+        '-c:v',
+        'libx264',
+        '-preset',
+        mobile ? 'ultrafast' : 'veryfast',
+        '-crf',
+        '23',
+        '-pix_fmt',
+        'yuv420p',
+        '-c:a',
+        'aac',
+        '-movflags',
+        '+faststart',
+        outName,
+      )
+      await engine.exec(args)
+      const blob = await engine.readBlob(outName, 'video/mp4', [videoName])
+      publishResult(blob, 'nastro-modifica.mp4', 'edit')
+      setStatus(lang === 'it' ? 'Fatto!' : 'Done!')
+    })
+  }
+
+  function burnText() {
+    if (!video || !overlayText.trim()) return
+    void withJob(async () => {
+      const videoName = 'input_video' + extOf(video.name, '.mp4')
+      const outName = 'texted.mp4'
+      await engine.delete(videoName)
+      await engine.delete(outName)
+      await engine.write(videoName, video)
+      setStatus(lang === 'it' ? 'Aggiungo testo…' : 'Burning text…')
+      const safe = overlayText
+        .replace(/\\/g, '\\\\')
+        .replace(/:/g, '\\:')
+        .replace(/'/g, "\\\\'")
+        .slice(0, 80)
+      // drawtext may be unavailable in some wasm builds — fallback to overlay box via geq is hard;
+      // try drawtext, else fail clearly.
+      try {
+        await engine.exec([
+          '-i',
+          videoName,
+          '-vf',
+          `drawtext=text='${safe}':fontsize=${overlaySize}:fontcolor=white:borderw=2:bordercolor=black:x=(w-text_w)/2:y=h-text_h-40`,
+          '-c:v',
+          'libx264',
+          '-preset',
+          'ultrafast',
+          '-crf',
+          '23',
+          '-c:a',
+          'copy',
+          '-movflags',
+          '+faststart',
+          outName,
+        ])
+      } catch {
+        throw new Error(
+          lang === 'it'
+            ? 'Testo non supportato in questo browser. Prova Chrome desktop.'
+            : 'Text overlay unsupported here. Try desktop Chrome.',
+        )
+      }
+      const blob = await engine.readBlob(outName, 'video/mp4', [videoName])
+      publishResult(blob, 'nastro-testo.mp4', 'text')
+      setStatus(lang === 'it' ? 'Fatto!' : 'Done!')
+    })
+  }
+
+  function convert() {
+    if (!video) return
+    void withJob(async () => {
+      const videoName = 'input_video' + extOf(video.name, '.mp4')
+      await engine.delete(videoName)
+      await engine.write(videoName, video)
+      if (convertKind === 'gif') {
+        const outName = 'out.gif'
+        await engine.delete(outName)
+        setStatus(lang === 'it' ? 'Creo GIF…' : 'Making GIF…')
+        await engine.exec([
+          '-i',
+          videoName,
+          '-t',
+          '6',
+          '-vf',
+          'fps=10,scale=480:-1:flags=lanczos',
+          outName,
+        ])
+        const blob = await engine.readBlob(outName, 'image/gif', [videoName])
+        publishResult(blob, 'nastro.gif', 'gif')
+      } else if (convertKind === 'mp3') {
+        const outName = 'out.mp3'
+        await engine.delete(outName)
+        setStatus(lang === 'it' ? 'Estraggo MP3…' : 'Extracting MP3…')
+        await engine.exec(['-i', videoName, '-vn', '-c:a', 'libmp3lame', '-b:a', '192k', outName])
+        const blob = await engine.readBlob(outName, 'audio/mpeg', [videoName])
+        publishResult(blob, 'nastro.mp3', 'mp3')
+      } else {
+        const outName = 'out.wav'
+        await engine.delete(outName)
+        setStatus(lang === 'it' ? 'Estraggo WAV…' : 'Extracting WAV…')
+        await engine.exec(['-i', videoName, '-vn', outName])
+        const blob = await engine.readBlob(outName, 'audio/wav', [videoName])
+        publishResult(blob, 'nastro.wav', 'wav')
+      }
+      setStatus(lang === 'it' ? 'Fatto!' : 'Done!')
+    })
+  }
+
+  function addBatchFiles(list: FileList | null) {
+    if (!list) return
+    const items: BatchItem[] = [...list]
+      .filter(isVideoFile)
+      .map((file) => ({
+        id: `${file.name}-${file.size}-${Math.random().toString(36).slice(2, 7)}`,
+        file,
+        status: 'queued' as const,
+      }))
+    setBatch((prev) => [...prev, ...items])
+  }
+
+  function runBatch() {
+    if (!batch.length) return
+    void withJob(async () => {
+      const next = [...batch]
+      for (let i = 0; i < next.length; i++) {
+        const item = next[i]
+        if (item.status === 'done') continue
+        next[i] = { ...item, status: 'running' }
+        setBatch([...next])
+        setStatus(`${lang === 'it' ? 'Coda' : 'Queue'}: ${item.file.name}`)
+        try {
+          const blob = await compressOne(item.file)
+          const url = URL.createObjectURL(blob)
+          next[i] = { ...item, status: 'done', resultUrl: url }
+        } catch (err) {
+          next[i] = {
+            ...item,
+            status: 'error',
+            error: err instanceof Error ? err.message : 'error',
+          }
+        }
+        setBatch([...next])
+      }
+      setStatus(lang === 'it' ? 'Coda completata.' : 'Queue complete.')
+      setProgress(100)
+    })
+  }
+
+  const canRun = Boolean(video && ready && !busy)
   const canMix = Boolean(
     video && audio && ready && !busy && video.size <= musicVideoLimitBytes(),
   )
 
-  let help = ''
-  if (!ready && loadingEngine) help = 'Attendi: sto caricando il motore video…'
-  else if (!ready) help = 'Motore non pronto: ricarica o usa Chrome/Edge.'
-  else if (tab === 'compress') {
-    if (!video) help = 'Carica un video, scegli qualità/FPS e premi Comprimi.'
-    else if (busy) help = 'Compressione in corso…'
-  } else if (!video && !audio)
-    help = mobile
-      ? 'Su telefono: prima Comprimi a 720p, poi qui carica video leggero + MP3.'
-      : 'Carica video + file audio (MP3/M4A), poi premi il pulsante.'
-  else if (!video) help = 'Manca il video.'
-  else if (!audio) help = 'Manca la musica (file sul telefono, non Spotify).'
-  else if (video.size > musicVideoLimitBytes())
-    help = `Questo video (${formatBytes(video.size)}) è troppo pesante: comprimilo prima.`
-  else if (busy) help = 'Elaborazione in corso… non chiudere l’app.'
+  const tabs: { id: AppTab; label: string }[] = [
+    { id: 'compress', label: t(lang, 'compress') },
+    { id: 'music', label: t(lang, 'music') },
+    { id: 'edit', label: t(lang, 'edit') },
+    { id: 'text', label: t(lang, 'text') },
+    { id: 'convert', label: t(lang, 'convert') },
+    { id: 'batch', label: t(lang, 'batch') },
+    { id: 'settings', label: t(lang, 'settings') },
+  ]
 
   return (
     <main className="app">
@@ -604,107 +697,122 @@ export default function App() {
           <BrandMark />
           <h1 className="brand-name">Nastro</h1>
         </div>
-        <p className="tagline">
-          Comprimi i video tenendo una bella qualità, oppure metti la tua musica. Tutto resta sul
-          tuo dispositivo.
-        </p>
+        <p className="tagline">{t(lang, 'tagline')}</p>
       </header>
 
-      <div className="tabs" role="tablist" aria-label="Modalità">
-        <button
-          type="button"
-          role="tab"
-          className={`tab ${tab === 'compress' ? 'active' : ''}`}
-          aria-selected={tab === 'compress'}
-          disabled={busy}
-          onClick={() => switchTab('compress')}
-        >
-          Comprimi
-        </button>
-        <button
-          type="button"
-          role="tab"
-          className={`tab ${tab === 'music' ? 'active' : ''}`}
-          aria-selected={tab === 'music'}
-          disabled={busy}
-          onClick={() => switchTab('music')}
-        >
-          Musica
-        </button>
+      <div className="tabs" role="tablist">
+        {tabs.map((item) => (
+          <button
+            key={item.id}
+            type="button"
+            role="tab"
+            className={`tab ${tab === item.id ? 'active' : ''}`}
+            aria-selected={tab === item.id}
+            disabled={busy && tab !== item.id}
+            onClick={() => switchTab(item.id)}
+          >
+            {item.label}
+          </button>
+        ))}
       </div>
 
       <div className="workspace">
-        <div className={`drop-grid ${tab === 'compress' ? 'single' : ''}`}>
-          <label
-            className={`dropzone ${video ? 'has-file' : ''} ${dragOver === 'video' ? 'active' : ''}`}
-            onDragOver={(e) => {
-              e.preventDefault()
-              setDragOver('video')
-            }}
-            onDragLeave={() => setDragOver(null)}
-            onDrop={(e) => onDrop('video', e)}
-          >
-            <p className="drop-label">Video</p>
-            <p className="drop-hint">Trascina o clicca · MP4, WebM, MOV</p>
-            {video && (
-              <div className="file-chip">
-                <span>
-                  {video.name} · {formatBytes(video.size)}
-                </span>
-              </div>
-            )}
-            <input
-              type="file"
-              accept="video/*,.mp4,.mov,.webm,.m4v"
-              disabled={busy}
-              onChange={(e) => pickFile('video', e.target.files?.[0])}
-            />
-          </label>
-
-          {tab === 'music' && (
+        {tab !== 'settings' && tab !== 'batch' && (
+          <div className={`drop-grid ${tab === 'music' ? '' : 'single'}`}>
             <label
-              className={`dropzone ${audio ? 'has-file' : ''} ${dragOver === 'audio' ? 'active' : ''}`}
+              className={`dropzone ${video ? 'has-file' : ''} ${dragOver === 'video' ? 'active' : ''}`}
               onDragOver={(e) => {
                 e.preventDefault()
-                setDragOver('audio')
+                setDragOver('video')
               }}
               onDragLeave={() => setDragOver(null)}
-              onDrop={(e) => onDrop('audio', e)}
+              onDrop={(e) => onDrop('video', e)}
             >
-              <p className="drop-label">Musica</p>
-              <p className="drop-hint">File MP3 / WAV / M4A (non da Spotify)</p>
-              {audio && (
+              <p className="drop-label">{t(lang, 'video')}</p>
+              <p className="drop-hint">{t(lang, 'dropVideo')}</p>
+              {video && (
                 <div className="file-chip">
                   <span>
-                    {audio.name} · {formatBytes(audio.size)}
+                    {video.name} · {formatBytes(video.size)}
+                    {videoDuration > 0 ? ` · ${formatDuration(videoDuration)}` : ''}
                   </span>
                 </div>
               )}
               <input
                 type="file"
-                accept="audio/*,.mp3,.wav,.m4a,.aac,.ogg,.flac"
+                accept="video/*"
                 disabled={busy}
-                onChange={(e) => pickFile('audio', e.target.files?.[0])}
+                onChange={(e) => pickFile('video', e.target.files?.[0])}
               />
             </label>
-          )}
-        </div>
 
-        {(videoUrl || resultUrl) && (
-          <div className="preview">
-            <video
-              key={resultUrl ?? videoUrl ?? 'preview'}
-              src={resultUrl ?? videoUrl ?? undefined}
-              controls
-              playsInline
+            {tab === 'music' && (
+              <label
+                className={`dropzone ${audio ? 'has-file' : ''} ${dragOver === 'audio' ? 'active' : ''}`}
+                onDragOver={(e) => {
+                  e.preventDefault()
+                  setDragOver('audio')
+                }}
+                onDragLeave={() => setDragOver(null)}
+                onDrop={(e) => onDrop('audio', e)}
+              >
+                <p className="drop-label">{t(lang, 'audio')}</p>
+                <p className="drop-hint">{t(lang, 'dropAudio')}</p>
+                {audio && (
+                  <div className="file-chip">
+                    <span>
+                      {audio.name} · {formatBytes(audio.size)}
+                    </span>
+                  </div>
+                )}
+                <input
+                  type="file"
+                  accept="audio/*"
+                  disabled={busy}
+                  onChange={(e) => pickFile('audio', e.target.files?.[0])}
+                />
+              </label>
+            )}
+          </div>
+        )}
+
+        {tab === 'batch' && (
+          <label className="dropzone single has-file">
+            <p className="drop-label">{t(lang, 'batch')}</p>
+            <p className="drop-hint">
+              {lang === 'it'
+                ? 'Seleziona più video da comprimere in coda'
+                : 'Select multiple videos to compress in queue'}
+            </p>
+            <input
+              type="file"
+              accept="video/*"
+              multiple
+              disabled={busy}
+              onChange={(e) => addBatchFiles(e.target.files)}
             />
+          </label>
+        )}
+
+        {(videoUrl || resultUrl) && tab !== 'settings' && tab !== 'batch' && (
+          <div className="preview">
+            {resultKind === 'gif' && resultUrl ? (
+              <img src={resultUrl} alt="GIF" />
+            ) : (
+              <video
+                key={resultUrl ?? videoUrl ?? 'v'}
+                src={resultUrl ?? videoUrl ?? undefined}
+                controls
+                playsInline
+              />
+            )}
           </div>
         )}
 
         <section className="controls">
-          {tab === 'compress' ? (
+          {tab === 'compress' && (
             <>
-              <div className="preset-row" role="group" aria-label="Preset qualità">
+              <div className="preset-row">
                 {(Object.keys(PRESETS) as QualityPreset[]).map((key) => (
                   <button
                     key={key}
@@ -721,7 +829,6 @@ export default function App() {
                   </button>
                 ))}
               </div>
-
               <div className="field-grid">
                 <div className="control-row">
                   <label htmlFor="fps">FPS</label>
@@ -731,33 +838,31 @@ export default function App() {
                     disabled={busy}
                     onChange={(e) => setFps(e.target.value as FpsOption)}
                   >
-                    <option value="original">Come l’originale</option>
-                    <option value="60">60 fps</option>
-                    <option value="30">30 fps</option>
-                    <option value="24">24 fps (cinema)</option>
-                    <option value="15">15 fps</option>
+                    <option value="original">Original</option>
+                    <option value="60">60</option>
+                    <option value="30">30</option>
+                    <option value="24">24</option>
+                    <option value="15">15</option>
                   </select>
                 </div>
-
                 <div className="control-row">
-                  <label htmlFor="res">Risoluzione</label>
+                  <label htmlFor="res">{lang === 'it' ? 'Risoluzione' : 'Resolution'}</label>
                   <select
                     id="res"
                     value={resolution}
                     disabled={busy}
                     onChange={(e) => setResolution(e.target.value as ResOption)}
                   >
-                    <option value="original">Come l’originale</option>
+                    <option value="original">Original</option>
                     <option value="1080">1080p</option>
                     <option value="720">720p</option>
                     <option value="480">480p</option>
                   </select>
                 </div>
               </div>
-
               <div className="control-row">
                 <label>
-                  Qualità fine (CRF) <em>{effectiveCrf}</em>
+                  CRF <em>{effectiveCrf}</em>
                 </label>
                 <input
                   type="range"
@@ -767,37 +872,36 @@ export default function App() {
                   disabled={busy}
                   onChange={(e) => setCrfOverride(Number(e.target.value))}
                 />
-                <p className="drop-hint">Valori più bassi = qualità più alta e file più grande.</p>
               </div>
-
+              {video && (
+                <p className="drop-hint">
+                  {lang === 'it' ? 'Tempo stimato' : 'Estimated time'}: ~{formatDuration(eta)}
+                </p>
+              )}
               <div className="actions">
-                <button
-                  type="button"
-                  className="btn btn-primary"
-                  disabled={!canCompress}
-                  onClick={() => void compress()}
-                >
-                  {busy && tab === 'compress' && <span className="spinner" aria-hidden />}
-                  {busy && tab === 'compress' ? 'Compressione…' : 'Comprimi video'}
+                <button type="button" className="btn btn-primary" disabled={!canRun} onClick={compress}>
+                  {busy ? t(lang, 'busy') : t(lang, 'compress')}
                 </button>
+                {busy && (
+                  <button type="button" className="btn btn-danger" onClick={cancelJob}>
+                    {t(lang, 'cancel')}
+                  </button>
+                )}
                 {resultUrl && resultKind === 'compress' && (
                   <>
-                    <a className="btn btn-ghost" href={resultUrl} download="nastro-compresso.mp4">
-                      Scarica MP4
+                    <a className="btn btn-ghost" href={resultUrl} download={resultName}>
+                      {t(lang, 'download')}
                     </a>
-                    <button
-                      type="button"
-                      className="btn btn-ghost"
-                      disabled={busy}
-                      onClick={useCompressedForMusic}
-                    >
-                      Usa in Musica
+                    <button type="button" className="btn btn-ghost" onClick={useCompressedForMusic}>
+                      {lang === 'it' ? 'Usa in Musica' : 'Use in Music'}
                     </button>
                   </>
                 )}
               </div>
             </>
-          ) : (
+          )}
+
+          {tab === 'music' && (
             <>
               <label className="toggle">
                 <input
@@ -806,12 +910,20 @@ export default function App() {
                   disabled={busy}
                   onChange={(e) => setMixMode(e.target.checked ? 'mix' : 'replace')}
                 />
-                Mantieni anche l’audio originale del video (mix)
+                {lang === 'it' ? 'Mix con audio originale' : 'Mix with original audio'}
               </label>
-
+              <label className="toggle">
+                <input
+                  type="checkbox"
+                  checked={loopMusic}
+                  disabled={busy}
+                  onChange={(e) => setLoopMusic(e.target.checked)}
+                />
+                {lang === 'it' ? 'Ripeti musica se più corta' : 'Loop music if shorter'}
+              </label>
               <div className="control-row">
                 <label>
-                  Volume musica <em>{musicVolume}%</em>
+                  {lang === 'it' ? 'Volume musica' : 'Music volume'} <em>{musicVolume}%</em>
                 </label>
                 <input
                   type="range"
@@ -822,11 +934,11 @@ export default function App() {
                   onChange={(e) => setMusicVolume(Number(e.target.value))}
                 />
               </div>
-
               {mixMode === 'mix' && (
                 <div className="control-row">
                   <label>
-                    Volume audio originale <em>{originalVolume}%</em>
+                    {lang === 'it' ? 'Volume originale' : 'Original volume'}{' '}
+                    <em>{originalVolume}%</em>
                   </label>
                   <input
                     type="range"
@@ -838,50 +950,344 @@ export default function App() {
                   />
                 </div>
               )}
-
+              <div className="field-grid">
+                <div className="control-row">
+                  <label>
+                    {lang === 'it' ? 'Inizio musica (s)' : 'Music start (s)'} <em>{musicStart}</em>
+                  </label>
+                  <input
+                    type="range"
+                    min={0}
+                    max={60}
+                    step={0.5}
+                    value={musicStart}
+                    disabled={busy}
+                    onChange={(e) => setMusicStart(Number(e.target.value))}
+                  />
+                </div>
+                <div className="control-row">
+                  <label>
+                    Fade in/out <em>{fadeIn}/{fadeOut}s</em>
+                  </label>
+                  <div className="field-grid">
+                    <input
+                      type="number"
+                      min={0}
+                      max={5}
+                      step={0.1}
+                      value={fadeIn}
+                      disabled={busy}
+                      onChange={(e) => setFadeIn(Number(e.target.value))}
+                    />
+                    <input
+                      type="number"
+                      min={0}
+                      max={5}
+                      step={0.1}
+                      value={fadeOut}
+                      disabled={busy}
+                      onChange={(e) => setFadeOut(Number(e.target.value))}
+                    />
+                  </div>
+                </div>
+              </div>
               <div className="actions">
-                <button
-                  type="button"
-                  className="btn btn-primary"
-                  disabled={!canMix}
-                  onClick={() => void mixMusic()}
-                >
-                  {busy && tab === 'music' && <span className="spinner" aria-hidden />}
-                  {busy && tab === 'music' ? 'Elaborazione…' : 'Metti la musica'}
+                <button type="button" className="btn btn-primary" disabled={!canMix} onClick={mixMusic}>
+                  {busy ? t(lang, 'busy') : lang === 'it' ? 'Metti la musica' : 'Add music'}
                 </button>
+                {busy && (
+                  <button type="button" className="btn btn-danger" onClick={cancelJob}>
+                    {t(lang, 'cancel')}
+                  </button>
+                )}
                 {resultUrl && resultKind === 'music' && (
-                  <a className="btn btn-ghost" href={resultUrl} download="nastro-musica.mp4">
-                    Scarica MP4
+                  <a className="btn btn-ghost" href={resultUrl} download={resultName}>
+                    {t(lang, 'download')}
                   </a>
                 )}
               </div>
             </>
           )}
 
-          {(busy || progress > 0) && (
+          {tab === 'edit' && (
+            <>
+              <div className="field-grid">
+                <div className="control-row">
+                  <label>
+                    {lang === 'it' ? 'Inizio (s)' : 'Start (s)'} <em>{trimStart}</em>
+                  </label>
+                  <input
+                    type="number"
+                    min={0}
+                    step={0.1}
+                    value={trimStart}
+                    disabled={busy}
+                    onChange={(e) => setTrimStart(Number(e.target.value))}
+                  />
+                </div>
+                <div className="control-row">
+                  <label>
+                    {lang === 'it' ? 'Fine (s)' : 'End (s)'} <em>{trimEnd}</em>
+                  </label>
+                  <input
+                    type="number"
+                    min={0}
+                    step={0.1}
+                    value={trimEnd}
+                    disabled={busy}
+                    onChange={(e) => setTrimEnd(Number(e.target.value))}
+                  />
+                </div>
+                <div className="control-row">
+                  <label htmlFor="rot">{lang === 'it' ? 'Rotazione' : 'Rotate'}</label>
+                  <select
+                    id="rot"
+                    value={rotate}
+                    disabled={busy}
+                    onChange={(e) => setRotate(e.target.value as Rotate)}
+                  >
+                    <option value="0">0°</option>
+                    <option value="90">90°</option>
+                    <option value="180">180°</option>
+                    <option value="270">270°</option>
+                  </select>
+                </div>
+                <div className="control-row">
+                  <label htmlFor="spd">{lang === 'it' ? 'Velocità' : 'Speed'}</label>
+                  <select
+                    id="spd"
+                    value={speed}
+                    disabled={busy}
+                    onChange={(e) => setSpeed(e.target.value as Speed)}
+                  >
+                    <option value="0.5">0.5x</option>
+                    <option value="0.75">0.75x</option>
+                    <option value="1">1x</option>
+                    <option value="1.25">1.25x</option>
+                    <option value="1.5">1.5x</option>
+                    <option value="2">2x</option>
+                  </select>
+                </div>
+              </div>
+              <label className="toggle">
+                <input
+                  type="checkbox"
+                  checked={cropCenter}
+                  disabled={busy}
+                  onChange={(e) => setCropCenter(e.target.checked)}
+                />
+                {lang === 'it' ? 'Ritaglia al centro (85%)' : 'Center crop (85%)'}
+              </label>
+              <div className="actions">
+                <button type="button" className="btn btn-primary" disabled={!canRun} onClick={editVideo}>
+                  {busy ? t(lang, 'busy') : lang === 'it' ? 'Applica modifiche' : 'Apply edits'}
+                </button>
+                {busy && (
+                  <button type="button" className="btn btn-danger" onClick={cancelJob}>
+                    {t(lang, 'cancel')}
+                  </button>
+                )}
+                {resultUrl && resultKind === 'edit' && (
+                  <a className="btn btn-ghost" href={resultUrl} download={resultName}>
+                    {t(lang, 'download')}
+                  </a>
+                )}
+              </div>
+            </>
+          )}
+
+          {tab === 'text' && (
+            <>
+              <div className="control-row">
+                <label htmlFor="txt">{lang === 'it' ? 'Testo overlay' : 'Overlay text'}</label>
+                <input
+                  id="txt"
+                  type="text"
+                  maxLength={80}
+                  value={overlayText}
+                  disabled={busy}
+                  placeholder={lang === 'it' ? 'Es. Ciao dal video' : 'e.g. Hello'}
+                  onChange={(e) => setOverlayText(e.target.value)}
+                />
+              </div>
+              <div className="control-row">
+                <label>
+                  {lang === 'it' ? 'Dimensione' : 'Size'} <em>{overlaySize}</em>
+                </label>
+                <input
+                  type="range"
+                  min={18}
+                  max={72}
+                  value={overlaySize}
+                  disabled={busy}
+                  onChange={(e) => setOverlaySize(Number(e.target.value))}
+                />
+              </div>
+              <div className="actions">
+                <button
+                  type="button"
+                  className="btn btn-primary"
+                  disabled={!canRun || !overlayText.trim()}
+                  onClick={burnText}
+                >
+                  {busy ? t(lang, 'busy') : lang === 'it' ? 'Aggiungi testo' : 'Burn text'}
+                </button>
+                {busy && (
+                  <button type="button" className="btn btn-danger" onClick={cancelJob}>
+                    {t(lang, 'cancel')}
+                  </button>
+                )}
+                {resultUrl && resultKind === 'text' && (
+                  <a className="btn btn-ghost" href={resultUrl} download={resultName}>
+                    {t(lang, 'download')}
+                  </a>
+                )}
+              </div>
+            </>
+          )}
+
+          {tab === 'convert' && (
+            <>
+              <div className="control-row">
+                <label htmlFor="conv">{lang === 'it' ? 'Formato' : 'Format'}</label>
+                <select
+                  id="conv"
+                  value={convertKind}
+                  disabled={busy}
+                  onChange={(e) => setConvertKind(e.target.value as ConvertKind)}
+                >
+                  <option value="gif">GIF (max 6s)</option>
+                  <option value="mp3">MP3 audio</option>
+                  <option value="wav">WAV audio</option>
+                </select>
+              </div>
+              <div className="actions">
+                <button type="button" className="btn btn-primary" disabled={!canRun} onClick={convert}>
+                  {busy ? t(lang, 'busy') : t(lang, 'convert')}
+                </button>
+                {busy && (
+                  <button type="button" className="btn btn-danger" onClick={cancelJob}>
+                    {t(lang, 'cancel')}
+                  </button>
+                )}
+                {resultUrl && ['gif', 'mp3', 'wav'].includes(resultKind || '') && (
+                  <a className="btn btn-ghost" href={resultUrl} download={resultName}>
+                    {t(lang, 'download')}
+                  </a>
+                )}
+              </div>
+            </>
+          )}
+
+          {tab === 'batch' && (
+            <>
+              <div className="batch-list">
+                {batch.length === 0 && (
+                  <p className="drop-hint">
+                    {lang === 'it' ? 'Nessun video in coda.' : 'No videos queued.'}
+                  </p>
+                )}
+                {batch.map((item) => (
+                  <div key={item.id} className="batch-item">
+                    <span>
+                      <strong>{item.file.name}</strong> · {formatBytes(item.file.size)} ·{' '}
+                      {item.status}
+                    </span>
+                    {item.resultUrl && (
+                      <a href={item.resultUrl} download={`nastro-${item.file.name}.mp4`}>
+                        {t(lang, 'download')}
+                      </a>
+                    )}
+                  </div>
+                ))}
+              </div>
+              <div className="actions">
+                <button
+                  type="button"
+                  className="btn btn-primary"
+                  disabled={!batch.length || busy || !ready}
+                  onClick={runBatch}
+                >
+                  {busy ? t(lang, 'busy') : lang === 'it' ? 'Avvia coda' : 'Run queue'}
+                </button>
+                {busy && (
+                  <button type="button" className="btn btn-danger" onClick={cancelJob}>
+                    {t(lang, 'cancel')}
+                  </button>
+                )}
+                <button
+                  type="button"
+                  className="btn btn-ghost"
+                  disabled={busy}
+                  onClick={() => setBatch([])}
+                >
+                  {lang === 'it' ? 'Svuota' : 'Clear'}
+                </button>
+              </div>
+            </>
+          )}
+
+          {tab === 'settings' && (
+            <>
+              <div className="field-grid">
+                <div className="control-row">
+                  <label htmlFor="theme">{t(lang, 'theme')}</label>
+                  <select
+                    id="theme"
+                    value={theme}
+                    onChange={(e) => setTheme(e.target.value as Theme)}
+                  >
+                    <option value="dark">{t(lang, 'dark')}</option>
+                    <option value="light">{t(lang, 'light')}</option>
+                  </select>
+                </div>
+                <div className="control-row">
+                  <label htmlFor="lang">{t(lang, 'language')}</label>
+                  <select id="lang" value={lang} onChange={(e) => setLang(e.target.value as Lang)}>
+                    <option value="it">Italiano</option>
+                    <option value="en">English</option>
+                  </select>
+                </div>
+              </div>
+              <p className="drop-hint">
+                {lang === 'it'
+                  ? 'Backend cloud per file enormi: non incluso (limiti Vercel). Tutto resta locale sul dispositivo.'
+                  : 'Cloud backend for huge files: not included (Vercel limits). Everything stays local.'}
+              </p>
+            </>
+          )}
+
+          {(busy || progress > 0) && tab !== 'settings' && (
             <div className="progress" aria-hidden>
               <i style={{ width: `${Math.max(progress, busy ? 5 : 0)}%` }} />
             </div>
           )}
 
-          {video && resultSize != null && (
+          {video && resultSize != null && tab !== 'settings' && tab !== 'batch' && (
             <div className="stats">
               <span>
-                Originale <strong>{formatBytes(video.size)}</strong>
+                In <strong>{formatBytes(video.size)}</strong>
               </span>
               <span>
-                Risultato <strong>{formatBytes(resultSize)}</strong>
+                Out <strong>{formatBytes(resultSize)}</strong>
               </span>
             </div>
           )}
 
-          <p className={`status ${error ? 'error' : ''}`}>{error ?? (help || status)}</p>
+          {tab !== 'settings' && (
+            <p className={`status ${error ? 'error' : ''}`}>
+              {error ??
+                (loadingEngine
+                  ? lang === 'it'
+                    ? 'Caricamento motore…'
+                    : 'Loading engine…'
+                  : status)}
+            </p>
+          )}
         </section>
       </div>
 
-      <p className="footer">
-        Elaborazione locale con FFmpeg · i file non lasciano il browser
-      </p>
+      <p className="footer">{t(lang, 'footer')}</p>
     </main>
   )
 }
