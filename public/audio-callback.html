@@ -41,8 +41,9 @@
           }, 1200)
           return
         }
-        // Store code for the app to finish PKCE exchange
+        // Store code for the app to finish PKCE exchange (local + session for mobile)
         try {
+          localStorage.setItem('nastro-audiocom-code', code)
           sessionStorage.setItem('nastro-audiocom-code', code)
         } catch (e) {}
         location.replace('/?audiocom=1')

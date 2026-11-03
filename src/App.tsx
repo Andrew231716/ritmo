@@ -18,9 +18,10 @@ import {
   beginAudioComLogin,
   canImportTrack,
   clearAudioComAuth,
+  ensureAudioComToken,
   finishAudioComLogin,
-  getStoredToken,
   importAudioComTrack,
+  isAudioComAuthed,
   searchAudioCom,
   trackPageUrl,
   trackPlayUrl,
@@ -220,11 +221,14 @@ export default function App() {
   }, [voicePreviewUrl])
 
   useEffect(() => {
-    setAudioComAuthed(Boolean(getStoredToken()))
+    setAudioComAuthed(isAudioComAuthed())
     const params = new URLSearchParams(window.location.search)
     if (params.get('audiocom') === '1') {
-      const code = sessionStorage.getItem('nastro-audiocom-code')
+      const code =
+        sessionStorage.getItem('nastro-audiocom-code') ||
+        localStorage.getItem('nastro-audiocom-code')
       sessionStorage.removeItem('nastro-audiocom-code')
+      localStorage.removeItem('nastro-audiocom-code')
       window.history.replaceState({}, '', '/')
       if (code) {
         void (async () => {
@@ -235,15 +239,22 @@ export default function App() {
             setTab('music')
             setStatus(
               lang === 'it'
-                ? 'Audio.com collegato. Cerca una traccia scaricabile.'
-                : 'Audio.com connected. Search a downloadable track.',
+                ? 'Audio.com collegato e memorizzato su questo dispositivo.'
+                : 'Audio.com connected and saved on this device.',
             )
           } catch (err) {
             console.error(err)
             setError(err instanceof Error ? err.message : 'Audio.com login failed')
           }
         })()
+        return
       }
+    }
+    // Keep access alive across visits: refresh token in the background if needed.
+    if (isAudioComAuthed()) {
+      void ensureAudioComToken()
+        .then(() => setAudioComAuthed(true))
+        .catch(() => setAudioComAuthed(false))
     }
   }, [lang])
 
@@ -1212,10 +1223,20 @@ export default function App() {
                           setAudioComAuthed(false)
                           setAudioComResults([])
                           stopAudioComPreview()
+                          setStatus(
+                            lang === 'it'
+                              ? 'Audio.com disconnesso da questo dispositivo.'
+                              : 'Audio.com signed out on this device.',
+                          )
                         }}
                       >
                         {lang === 'it' ? 'Esci Audio.com' : 'Sign out'}
                       </button>
+                      <span className="drop-hint">
+                        {lang === 'it'
+                          ? 'Accesso salvato su questo dispositivo'
+                          : 'Access saved on this device'}
+                      </span>
                     </>
                   )}
                 </div>
