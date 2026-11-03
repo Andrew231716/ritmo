@@ -16,7 +16,15 @@ import {
 } from './lib/format'
 import { t, type Lang } from './lib/i18n'
 
-type AppTab = 'compress' | 'music' | 'edit' | 'text' | 'convert' | 'batch' | 'settings'
+type AppTab =
+  | 'compress'
+  | 'music'
+  | 'edit'
+  | 'text'
+  | 'convert'
+  | 'voice'
+  | 'batch'
+  | 'settings'
 type MixMode = 'replace' | 'mix'
 type QualityPreset = 'high' | 'balanced' | 'small'
 type FpsOption = 'original' | '60' | '30' | '24' | '15'
@@ -25,6 +33,7 @@ type Theme = 'dark' | 'light'
 type Rotate = '0' | '90' | '180' | '270'
 type Speed = '0.5' | '0.75' | '1' | '1.25' | '1.5' | '2'
 type ConvertKind = 'gif' | 'mp3' | 'wav'
+type VoiceMode = 'remove' | 'extract'
 
 type BatchItem = {
   id: string
@@ -122,6 +131,9 @@ export default function App() {
   const [overlayText, setOverlayText] = useState('')
   const [overlaySize, setOverlaySize] = useState(36)
   const [convertKind, setConvertKind] = useState<ConvertKind>('gif')
+  const [voiceMode, setVoiceMode] = useState<VoiceMode>('remove')
+  const [voiceSource, setVoiceSource] = useState<File | null>(null)
+  const [voicePreviewUrl, setVoicePreviewUrl] = useState<string | null>(null)
 
   const [batch, setBatch] = useState<BatchItem[]>([])
   const [busy, setBusy] = useState(false)
@@ -180,6 +192,12 @@ export default function App() {
       if (resultUrlRef.current) URL.revokeObjectURL(resultUrlRef.current)
     }
   }, [lang])
+
+  useEffect(() => {
+    return () => {
+      if (voicePreviewUrl) URL.revokeObjectURL(voicePreviewUrl)
+    }
+  }, [voicePreviewUrl])
 
   function setPreviewVideo(file: File | null) {
     if (videoUrlRef.current) {
@@ -254,6 +272,25 @@ export default function App() {
     e.preventDefault()
     setDragOver(null)
     pickFile(kind, e.dataTransfer.files?.[0])
+  }
+
+  function pickVoiceMedia(file: File | undefined | null) {
+    if (!file || busy) return
+    setError(null)
+    clearResult()
+    if (!isAudioFile(file) && !isVideoFile(file)) {
+      setError(
+        lang === 'it'
+          ? 'Carica un file audio o video stereo.'
+          : 'Upload a stereo audio or video file.',
+      )
+      return
+    }
+    if (voicePreviewUrl) URL.revokeObjectURL(voicePreviewUrl)
+    const url = URL.createObjectURL(file)
+    setVoicePreviewUrl(url)
+    setVoiceSource(file)
+    setStatus(`${file.name} · ${formatBytes(file.size)}`)
   }
 
   function cancelJob() {
@@ -635,6 +672,58 @@ export default function App() {
     })
   }
 
+  function separateVoice() {
+    if (!voiceSource) return
+    void withJob(async () => {
+      const inName = 'voice_in' + extOf(voiceSource.name, '.mp3')
+      const outName = voiceMode === 'remove' ? 'strumentale.mp3' : 'voce.mp3'
+      await engine.delete(inName)
+      await engine.delete(outName)
+      setStatus(
+        lang === 'it'
+          ? voiceMode === 'remove'
+            ? 'Tolgo la voce…'
+            : 'Estraggo la voce…'
+          : voiceMode === 'remove'
+            ? 'Removing vocals…'
+            : 'Extracting vocals…',
+      )
+      await engine.write(inName, voiceSource)
+
+      // Stereo mid/side heuristics (best when vocals are centered).
+      // remove: L-R / R-L cancels center · extract: mid channel + voice band
+      const filter =
+        voiceMode === 'remove'
+          ? 'pan=stereo|c0=0.5*c0+-0.5*c1|c1=0.5*c1+-0.5*c0,volume=1.55'
+          : 'pan=mono|c0=0.5*c0+0.5*c1,highpass=f=120,lowpass=f=7200,volume=1.6'
+
+      await engine.exec([
+        '-i',
+        inName,
+        '-vn',
+        '-af',
+        filter,
+        '-c:a',
+        'libmp3lame',
+        '-b:a',
+        '192k',
+        outName,
+      ])
+
+      const blob = await engine.readBlob(outName, 'audio/mpeg', [inName])
+      publishResult(
+        blob,
+        voiceMode === 'remove' ? 'nastro-strumentale.mp3' : 'nastro-voce.mp3',
+        voiceMode === 'remove' ? 'instrumental' : 'vocals',
+      )
+      setStatus(
+        lang === 'it'
+          ? 'Fatto! Funziona meglio su mix stereo con voce al centro.'
+          : 'Done! Works best on stereo mixes with centered vocals.',
+      )
+    })
+  }
+
   function addBatchFiles(list: FileList | null) {
     if (!list) return
     const items: BatchItem[] = [...list]
@@ -679,6 +768,7 @@ export default function App() {
   const canMix = Boolean(
     video && audio && ready && !busy && video.size <= musicVideoLimitBytes(),
   )
+  const canVoice = Boolean(voiceSource && ready && !busy)
 
   const tabs: { id: AppTab; label: string }[] = [
     { id: 'compress', label: t(lang, 'compress') },
@@ -686,6 +776,7 @@ export default function App() {
     { id: 'edit', label: t(lang, 'edit') },
     { id: 'text', label: t(lang, 'text') },
     { id: 'convert', label: t(lang, 'convert') },
+    { id: 'voice', label: t(lang, 'voice') },
     { id: 'batch', label: t(lang, 'batch') },
     { id: 'settings', label: t(lang, 'settings') },
   ]
@@ -717,7 +808,7 @@ export default function App() {
       </div>
 
       <div className="workspace">
-        {tab !== 'settings' && tab !== 'batch' && (
+        {tab !== 'settings' && tab !== 'batch' && tab !== 'voice' && (
           <div className={`drop-grid ${tab === 'music' ? '' : 'single'}`}>
             <label
               className={`dropzone ${video ? 'has-file' : ''} ${dragOver === 'video' ? 'active' : ''}`}
@@ -776,6 +867,38 @@ export default function App() {
           </div>
         )}
 
+        {tab === 'voice' && (
+          <label
+            className={`dropzone single ${voiceSource ? 'has-file' : ''} ${dragOver === 'audio' ? 'active' : ''}`}
+            onDragOver={(e) => {
+              e.preventDefault()
+              setDragOver('audio')
+            }}
+            onDragLeave={() => setDragOver(null)}
+            onDrop={(e) => {
+              e.preventDefault()
+              setDragOver(null)
+              pickVoiceMedia(e.dataTransfer.files?.[0])
+            }}
+          >
+            <p className="drop-label">{t(lang, 'voice')}</p>
+            <p className="drop-hint">{t(lang, 'dropVoice')}</p>
+            {voiceSource && (
+              <div className="file-chip">
+                <span>
+                  {voiceSource.name} · {formatBytes(voiceSource.size)}
+                </span>
+              </div>
+            )}
+            <input
+              type="file"
+              accept="audio/*,video/*,.mp3,.wav,.m4a,.mp4,.mov"
+              disabled={busy}
+              onChange={(e) => pickVoiceMedia(e.target.files?.[0])}
+            />
+          </label>
+        )}
+
         {tab === 'batch' && (
           <label className="dropzone single has-file">
             <p className="drop-label">{t(lang, 'batch')}</p>
@@ -794,10 +917,23 @@ export default function App() {
           </label>
         )}
 
-        {(videoUrl || resultUrl) && tab !== 'settings' && tab !== 'batch' && (
+        {((videoUrl && tab !== 'voice' && tab !== 'settings' && tab !== 'batch') ||
+          (voicePreviewUrl && tab === 'voice') ||
+          (resultUrl && tab !== 'settings' && tab !== 'batch')) && (
           <div className="preview">
             {resultKind === 'gif' && resultUrl ? (
               <img src={resultUrl} alt="GIF" />
+            ) : resultKind === 'instrumental' ||
+              resultKind === 'vocals' ||
+              resultKind === 'mp3' ||
+              resultKind === 'wav' ||
+              (tab === 'voice' && !resultUrl && voicePreviewUrl) ? (
+              <audio
+                key={resultUrl ?? voicePreviewUrl ?? 'a'}
+                src={resultUrl ?? voicePreviewUrl ?? undefined}
+                controls
+                style={{ width: '100%', margin: '1rem', display: 'block' }}
+              />
             ) : (
               <video
                 key={resultUrl ?? videoUrl ?? 'v'}
@@ -1175,6 +1311,73 @@ export default function App() {
                     {t(lang, 'download')}
                   </a>
                 )}
+              </div>
+            </>
+          )}
+
+          {tab === 'voice' && (
+            <>
+              <div className="preset-row">
+                <button
+                  type="button"
+                  className={`preset ${voiceMode === 'remove' ? 'active' : ''}`}
+                  disabled={busy}
+                  onClick={() => setVoiceMode('remove')}
+                >
+                  <strong>{lang === 'it' ? 'Elimina voce' : 'Remove vocals'}</strong>
+                  <span>
+                    {lang === 'it'
+                      ? 'Lascia lo strumentale (karaoke)'
+                      : 'Keep instrumental (karaoke)'}
+                  </span>
+                </button>
+                <button
+                  type="button"
+                  className={`preset ${voiceMode === 'extract' ? 'active' : ''}`}
+                  disabled={busy}
+                  onClick={() => setVoiceMode('extract')}
+                >
+                  <strong>{lang === 'it' ? 'Estrai voce' : 'Extract vocals'}</strong>
+                  <span>
+                    {lang === 'it'
+                      ? 'Tieni soprattutto la voce centrale'
+                      : 'Keep mainly centered vocals'}
+                  </span>
+                </button>
+              </div>
+              <p className="drop-hint">
+                {lang === 'it'
+                  ? 'Metodo stereo (non IA): funziona meglio se la voce è al centro. Su brani mono o mix particolari il risultato può essere parziale.'
+                  : 'Stereo method (not AI): best when vocals are centered. Mono or odd mixes may be partial.'}
+              </p>
+              <div className="actions">
+                <button
+                  type="button"
+                  className="btn btn-primary"
+                  disabled={!canVoice}
+                  onClick={separateVoice}
+                >
+                  {busy
+                    ? t(lang, 'busy')
+                    : voiceMode === 'remove'
+                      ? lang === 'it'
+                        ? 'Elimina voce'
+                        : 'Remove vocals'
+                      : lang === 'it'
+                        ? 'Estrai voce'
+                        : 'Extract vocals'}
+                </button>
+                {busy && (
+                  <button type="button" className="btn btn-danger" onClick={cancelJob}>
+                    {t(lang, 'cancel')}
+                  </button>
+                )}
+                {resultUrl &&
+                  (resultKind === 'instrumental' || resultKind === 'vocals') && (
+                    <a className="btn btn-ghost" href={resultUrl} download={resultName}>
+                      {t(lang, 'download')}
+                    </a>
+                  )}
               </div>
             </>
           )}

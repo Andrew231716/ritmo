@@ -9,6 +9,7 @@ Comprimi, modifica e metti la musica sui video — tutto nel browser.
 - **Modifica**: taglia, ruota, ritaglia, velocità
 - **Testo**: overlay testo sul video
 - **Converti**: GIF / MP3 / WAV
+- **Voce**: elimina voce (strumentale) o estrai voce da audio/video stereo
 - **Coda**: compressione multipla
 - **Impostazioni**: tema chiaro/scuro, IT/EN
 
